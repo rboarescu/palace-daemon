@@ -75,6 +75,32 @@ All other requests queue behind the lock while mining runs.
 
 Pass X-Api-Key: your-secret header on all requests except /health.
 
+
+## Clients
+
+### mempalace-mcp
+
+`clients/mempalace-mcp.py` bridges any MCP client to palace-daemon over HTTP.
+Use this on machines that don't host the palace locally — they talk to the
+daemon instead of running mempalace themselves.
+
+**Zero dependencies** — stdlib only, works anywhere Python 3.8+ is installed.
+
+Claude Code setup (`~/.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "mempalace": {
+      "command": "python",
+      "args": ["/path/to/clients/mempalace-mcp.py", "--daemon", "http://YOUR_SERVER:8085"]
+    }
+  }
+}
+```
+
+With API key: pass `--api-key your-secret` or set `PALACE_API_KEY` env var.
+
 ## Architecture
 
     Clients (Claude Code / Android app / netdash / curl)
