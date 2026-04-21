@@ -106,7 +106,9 @@ async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=Non
 
 @app.get("/health")
 async def health():
-    result = await _call({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}})
+    # Bypass semaphores — health must respond even when all slots are busy.
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _mp.handle_request, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}) or {}
     return {"status": "ok", "daemon": "palace-daemon", "palace": result}
 
 
@@ -154,19 +156,13 @@ async def store_memory(request: Request, x_api_key: str | None = Header(default=
 @app.get("/stats")
 async def stats(x_api_key: str | None = Header(default=None)):
     _check_auth(x_api_key)
-    results = {}
-    for req_id, tool in [(1, "mempalace_kg_stats"), (2, "mempalace_graph_stats"), (3, "mempalace_status")]:
-        r = await _call({
-            "jsonrpc": "2.0", "id": req_id,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": {}},
-        })
-        results[tool] = _unwrap(r)
-    return {
-        "kg": results["mempalace_kg_stats"],
-        "graph": results["mempalace_graph_stats"],
-        "status": results["mempalace_status"],
-    }
+    tools = ["mempalace_kg_stats", "mempalace_graph_stats", "mempalace_status"]
+    responses = await asyncio.gather(*[
+        _call({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": t, "arguments": {}}})
+        for i, t in enumerate(tools, 1)
+    ])
+    kg, graph, status = [_unwrap(r) for r in responses]
+    return {"kg": kg, "graph": graph, "status": status}
 
 
 # ── Mine endpoint (serialized bulk import) ────────────────────────────────────
