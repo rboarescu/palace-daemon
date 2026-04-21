@@ -1,17 +1,18 @@
 # palace-daemon
 
-An HTTP/MCP gateway for [MemPalace](https://github.com/MemPalace/mempalace) that serializes all ChromaDB access through a single process, preventing concurrent write corruption.
+An HTTP/MCP gateway for [MemPalace](https://github.com/MemPalace/mempalace) that coordinates concurrent access to the palace through a single process.
 
 ## Why
 
-MemPalace stores memories in ChromaDB (SQLite). When multiple clients write simultaneously — an AI agent, an Android app, a bulk import job — SQLite corrupts. palace-daemon fixes this by funnelling every operation through one asyncio.Lock().
+When multiple clients hit MemPalace simultaneously — an AI agent, an Android app, a bulk import job — you want a single chokepoint that controls throughput and keeps mining jobs from starving live queries. palace-daemon provides this through three asyncio semaphores: a read semaphore (N concurrent), a write semaphore (N/2 concurrent), and a mine semaphore (1 at a time). MemPalace ≥3.3.2 handles correctness internally (WAL mode, KG instance lock, mine PID guard); the daemon handles coordination.
 
 ## Features
 
 - **MCP proxy** — any MCP client connects to /mcp instead of spawning a local process
 - **REST API** — search, store, and query the palace over HTTP (Android app, netdash, scripts)
-- **Serialized mining** — /mine endpoint runs mempalace mine under the global lock, so bulk imports never race with live queries
-- **Optional API key auth** — set PALACE_API_KEY to protect all write endpoints
+- **Concurrent access control** — three semaphores coordinate reads, writes, and mine jobs; tunable via `PALACE_MAX_CONCURRENCY`
+- **Isolated mining** — /mine runs under its own semaphore so bulk imports never stall live traffic
+- **Optional API key auth** — set `PALACE_API_KEY` to protect all write endpoints
 - **Configurable** — host, port, palace path via CLI args or env vars
 
 ## Requirements
@@ -32,11 +33,14 @@ MemPalace stores memories in ChromaDB (SQLite). When multiple clients write simu
     # With API key auth
     PALACE_API_KEY=your-secret python main.py
 
+    # Higher concurrency (default: 4 reads, 2 writes)
+    PALACE_MAX_CONCURRENCY=8 python main.py
+
 
 ## Security
 
-> **Do not expose port 8085 to the internet without setting .**
-> The  endpoint accepts arbitrary filesystem paths — anyone with access
+> **Do not expose port 8085 to the internet without setting `PALACE_API_KEY`.**
+> The `/mine` endpoint accepts arbitrary filesystem paths — anyone with access
 > can trigger reads from any directory on your server.
 
 For local network use, leaving auth disabled is fine. For remote access, always set an API key:
@@ -63,13 +67,15 @@ Edit palace-daemon.service to set PALACE_API_KEY or a custom --palace path befor
 | POST | /mcp | Full MCP JSON-RPC proxy |
 | POST | /mine | Bulk import under lock |
 
-### /mine — serialized bulk import
+### /mine — bulk import
 
-    curl -X POST http://localhost:8085/mine       -H 'Content-Type: application/json'       -d '{"dir": "/path/to/files", "wing": "gemini", "mode": "convos"}'
+    curl -X POST http://localhost:8085/mine \
+      -H 'Content-Type: application/json' \
+      -d '{"dir": "/path/to/files", "wing": "gemini", "mode": "convos"}'
 
 Body: dir (required), wing, mode (projects/convos), extract (exchange/general), limit.
 
-All other requests queue behind the lock while mining runs.
+Mine jobs run one at a time under their own semaphore. Read and write traffic continues unblocked during a mine job.
 
 ### Auth
 
@@ -86,27 +92,35 @@ daemon instead of running mempalace themselves.
 
 **Zero dependencies** — stdlib only, works anywhere Python 3.8+ is installed.
 
-Claude Code setup (`~/.claude/settings.json`):
+Claude Code setup (`~/.claude.json` → `mcpServers`):
 
 ```json
 {
-  "mcpServers": {
-    "mempalace": {
-      "command": "python",
-      "args": ["/path/to/clients/mempalace-mcp.py", "--daemon", "http://YOUR_SERVER:8085"]
-    }
+  "mempalace": {
+    "type": "stdio",
+    "command": "/path/to/venv/python",
+    "args": ["/path/to/clients/mempalace-mcp.py", "--daemon", "http://YOUR_SERVER:8085"],
+    "env": {}
   }
 }
 ```
 
 With API key: pass `--api-key your-secret` or set `PALACE_API_KEY` env var.
 
+**Fallback mode:** if the daemon is unreachable at startup, the client automatically falls back to importing `mempalace.mcp_server` in-process. Tools keep working — a warning is printed to stderr.
+
 ## Architecture
 
     Clients (Claude Code / Android app / netdash / curl)
             |
             v
-      palace-daemon (FastAPI + asyncio.Lock)
-            |  single writer
+      palace-daemon (FastAPI)
+        ├── _read_sem(N)   — search, query, stats, …
+        ├── _write_sem(N/2) — add, update, kg mutations, …
+        └── _mine_sem(1)   — bulk import jobs
+            |
             v
-      ChromaDB (SQLite)  <--  mempalace mine (via /mine endpoint)
+      mempalace.mcp_server
+            |
+            v
+      ChromaDB / palace files

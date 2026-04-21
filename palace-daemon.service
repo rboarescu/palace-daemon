@@ -10,6 +10,10 @@ User=radu
 WorkingDirectory=/home/radu/palace-daemon
 # EDIT: set to your mempalace venv python (find with: pipx environment --value PIPX_LOCAL_VENVS)/mempalace/bin/python
 ExecStart=/home/radu/.local/share/pipx/venvs/mempalace/bin/python main.py
+# EDIT: uncomment and tune concurrency (default: 4 reads, 2 writes)
+# Environment=PALACE_MAX_CONCURRENCY=4
+# EDIT: uncomment to require an API key on all requests
+# Environment=PALACE_API_KEY=your-secret
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
