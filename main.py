@@ -1,9 +1,10 @@
 """
-palace-daemon — serializing HTTP/MCP gateway for MemPalace
+palace-daemon — HTTP/MCP gateway for MemPalace with concurrent access control
 
-All ChromaDB operations are funnelled through a single asyncio.Lock()
-to prevent concurrent access corruption. This includes bulk mining jobs,
-which run as a subprocess while the lock is held.
+Three semaphores govern concurrency (all tunable via PALACE_MAX_CONCURRENCY):
+  _read_sem  — up to N concurrent read-only ops (search, query, stats, …)
+  _write_sem — up to N//2 concurrent write ops (add, update, kg mutations, …)
+  _mine_sem  — one mine job at a time, independent of reads/writes
 """
 import argparse
 import asyncio
@@ -25,8 +26,38 @@ DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
 API_KEY = os.getenv("PALACE_API_KEY", "")  # read at startup for argparse default; auth checks re-read from env dynamically
+PALACE_MAX_CONCURRENCY = int(os.getenv("PALACE_MAX_CONCURRENCY", "4"))
 
-_lock = asyncio.Lock()
+# Read ops: up to N concurrent.
+# Regular write ops: up to N//2 concurrent (mempalace ≥3.3.2 is internally safe).
+# Mine jobs: exclusive semaphore independent of reads/writes so a long mine
+# doesn't starve normal traffic.
+_read_sem = asyncio.Semaphore(PALACE_MAX_CONCURRENCY)
+_write_sem = asyncio.Semaphore(max(1, PALACE_MAX_CONCURRENCY // 2))
+_mine_sem = asyncio.Semaphore(1)
+
+# Tools that only read state — everything else is treated as a write.
+_READ_TOOLS = {
+    "mempalace_search",
+    "mempalace_kg_query",
+    "mempalace_kg_stats",
+    "mempalace_kg_timeline",
+    "mempalace_graph_stats",
+    "mempalace_status",
+    "mempalace_list_drawers",
+    "mempalace_get_drawer",
+    "mempalace_list_rooms",
+    "mempalace_list_wings",
+    "mempalace_list_tunnels",
+    "mempalace_find_tunnels",
+    "mempalace_follow_tunnels",
+    "mempalace_traverse",
+    "mempalace_diary_read",
+    "mempalace_check_duplicate",
+    "mempalace_get_taxonomy",
+    "mempalace_get_aaak_spec",
+    "mempalace_hook_settings",
+}
 
 
 def _check_auth(x_api_key: str | None):
@@ -35,8 +66,16 @@ def _check_auth(x_api_key: str | None):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+def _sem_for(request_dict: dict) -> asyncio.Semaphore:
+    method = request_dict.get("method", "")
+    if method == "ping":
+        return _read_sem
+    tool_name = request_dict.get("params", {}).get("name", "")
+    return _read_sem if tool_name in _READ_TOOLS else _write_sem
+
+
 async def _call(request_dict: dict) -> dict:
-    async with _lock:
+    async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _mp.handle_request, request_dict)
         return result or {}
@@ -135,9 +174,9 @@ async def stats(x_api_key: str | None = Header(default=None)):
 @app.post("/mine")
 async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     """
-    Run mempalace mine under the global lock so no daemon request can touch
-    ChromaDB while the import is in progress. The lock queues all other
-    requests for the duration of the job.
+    Run mempalace mine under _mine_sem (one job at a time). Normal read/write
+    traffic continues unblocked during the job; mempalace ≥3.3.2 enforces
+    its own mine lock at the library level.
 
     Body: { "dir": "/path/to/files", "wing": "general", "mode": "convos",
             "extract": "exchange", "limit": 100 }
@@ -160,7 +199,7 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     if limit:
         cmd += ["--limit", str(limit)]
 
-    async with _lock:
+    async with _mine_sem:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,

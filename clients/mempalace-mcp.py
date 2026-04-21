@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-mempalace-mcp — stdio MCP proxy for palace-daemon
+mempalace-mcp — stdio MCP proxy for palace-daemon, with direct fallback
 
-Bridges any MCP client (Claude Code, Claude Desktop, etc.) to a remote
-palace-daemon instance over HTTP. Reads JSON-RPC from stdin, forwards to
-the daemon, writes responses to stdout.
+Primary mode: bridges MCP client → palace-daemon over HTTP (serialized,
+semaphore-protected, all clients coordinated through one chokepoint).
+
+Fallback mode: if the daemon is unreachable at startup, imports
+mempalace.mcp_server directly and handles requests in-process (same as
+the plain direct setup, minus the daemon's concurrency guarantees).
 
 Usage:
     python mempalace-mcp.py --daemon http://192.168.0.42:8085
     PALACE_DAEMON_URL=http://192.168.0.42:8085 python mempalace-mcp.py
 
-Claude Code setup (~/.claude/settings.json):
+Claude Code setup (~/.claude.json mcpServers):
     {
-      "mcpServers": {
-        "mempalace": {
-          "command": "python",
-          "args": ["/path/to/mempalace-mcp.py", "--daemon", "http://YOUR_SERVER:8085"]
-        }
+      "mempalace": {
+        "type": "stdio",
+        "command": "/path/to/venv/python",
+        "args": ["/path/to/mempalace-mcp.py", "--daemon", "http://localhost:8085"]
       }
     }
 """
@@ -33,8 +35,7 @@ API_KEY = os.getenv("PALACE_API_KEY", "")
 
 def find_daemon(url: str) -> bool:
     try:
-        health_url = url.rstrip("/") + "/health"
-        req = urllib.request.urlopen(health_url, timeout=3)
+        req = urllib.request.urlopen(url.rstrip("/") + "/health", timeout=3)
         return req.status == 200
     except Exception:
         return False
@@ -55,6 +56,44 @@ def forward(url: str, request: dict) -> dict:
         return json.loads(resp.read())
 
 
+def _stdio_loop(handle_line):
+    """Read JSON-RPC lines from stdin, call handle_line, print responses."""
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        response = handle_line(request)
+        if response is not None and request.get("id") is not None:
+            print(json.dumps(response), flush=True)
+
+
+def run_daemon_mode(daemon_url: str):
+    def handle(request):
+        try:
+            return forward(daemon_url, request)
+        except urllib.error.URLError as e:
+            return {"jsonrpc": "2.0", "id": request.get("id"),
+                    "error": {"code": -32000, "message": f"Daemon unreachable: {e}"}}
+        except Exception as e:
+            return {"jsonrpc": "2.0", "id": request.get("id"),
+                    "error": {"code": -32000, "message": str(e)}}
+
+    _stdio_loop(handle)
+
+
+def run_direct_mode():
+    import mempalace.mcp_server as _mp
+
+    def handle(request):
+        return _mp.handle_request(request) or {}
+
+    _stdio_loop(handle)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MCP stdio proxy for palace-daemon")
     parser.add_argument("--daemon", default=DEFAULT_DAEMON, help="palace-daemon base URL")
@@ -65,35 +104,12 @@ def main():
     if args.api_key:
         API_KEY = args.api_key
 
-    if not find_daemon(args.daemon):
-        print(f"palace-daemon unreachable at {args.daemon}", file=sys.stderr)
-        sys.exit(1)
-
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        try:
-            response = forward(args.daemon, request)
-        except urllib.error.URLError as e:
-            response = {
-                "jsonrpc": "2.0",
-                "id": request.get("id"),
-                "error": {"code": -32000, "message": f"Daemon unreachable: {e}"},
-            }
-        except Exception as e:
-            response = {
-                "jsonrpc": "2.0",
-                "id": request.get("id"),
-                "error": {"code": -32000, "message": str(e)},
-            }
-        if request.get("id") is None:
-            continue
-        print(json.dumps(response), flush=True)
+    if find_daemon(args.daemon):
+        print(f"palace-daemon: connected at {args.daemon}", file=sys.stderr)
+        run_daemon_mode(args.daemon)
+    else:
+        print(f"palace-daemon: unreachable at {args.daemon}, falling back to direct mode", file=sys.stderr)
+        run_direct_mode()
 
 
 if __name__ == "__main__":
