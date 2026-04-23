@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0] - 2026-04-23
+
+### Added
+- **Daemon Instance Locking** — implemented fcntl-based file lock (`/tmp/palace-daemon.lock`) to prevent multiple daemon instances from running concurrently
+- **Graceful Shutdown** — added SIGINT/SIGTERM handlers to ensure clean exits and reduce risk of stale SQLite locks during restarts
+- **Hardened Service** — `palace-daemon.service` now enforces explicit environment paths (`MEMPALACE_PALACE`) to prevent path ambiguity
+
+### Changed
+- **"Daemon-Only" Policy** — removed the direct fallback mode in `mempalace-mcp.py`. The client now exits with an error if the daemon is unreachable. This prevents "split-brain" scenarios and potential database corruption from concurrent process access.
+- Improved HNSW stale index detection to catch more internal error variations and provide specific recovery commands.
+
+### Security & Stability
+- Added high-visibility warnings against accessing the database over network mounts (NFS/Samba) which caused `SQLITE_IOERR` in previous versions.
+
 ## [1.1.2] - 2026-04-23
 
 ### Added

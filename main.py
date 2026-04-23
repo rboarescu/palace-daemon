@@ -18,6 +18,8 @@ import json
 import os
 import sqlite3
 import sys
+import fcntl
+import signal
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -31,7 +33,7 @@ from mempalace.backends.chroma import quarantine_stale_hnsw
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -91,10 +93,10 @@ async def _call(request_dict: dict) -> dict:
             result = await loop.run_in_executor(None, _mp.handle_request, request_dict)
             if result and "error" in result:
                 msg = str(result["error"].get("message", ""))
-                if "Internal error: Error finding id" in msg:
+                if "Internal error: Error finding id" in msg or "Internal error: id" in msg:
                     # Self-healing hint: This usually means HNSW index is stale.
                     # We don't auto-repair here as it's destructive/slow, but we tag the error.
-                    result["error"]["message"] += " (Daemon hint: HNSW index stale. Try restarting daemon or running 'mempalace repair')"
+                    result["error"]["message"] += " (Daemon hint: HNSW index stale. Run 'mempalace repair' or restart daemon to trigger auto-quarantine)"
             return result or {}
         except Exception as e:
             return {"jsonrpc": "2.0", "id": request_dict.get("id"), "error": {"code": -32000, "message": str(e)}}
@@ -103,6 +105,15 @@ async def _call(request_dict: dict) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import logging
+    # Register signal handlers for graceful shutdown
+    def handle_exit(sig, frame):
+        logging.getLogger(__name__).warning("Received signal %s, shutting down...", sig)
+        # _mp handles its own state, but we ensure the daemon stops accepting new tasks
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+
     moved = quarantine_stale_hnsw(_mp._config.palace_path)
     if moved:
         logging.getLogger(__name__).warning(
@@ -241,7 +252,7 @@ async def reload_palace(x_api_key: str | None = Header(default=None)):
     """Force the daemon to reconnect to the database and refresh its index."""
     _check_auth(x_api_key)
     # _mp._get_client uses a cache; we clear it to force a fresh PersistentClient
-    _mp._clients.clear()
+    _mp._client_cache = None; _mp._collection_cache = None
     return {"status": "reloaded", "message": "Palace client cache cleared"}
 
 
@@ -307,13 +318,27 @@ def _unwrap(mcp_response: dict) -> Any:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+# Global to prevent GC from closing the file and releasing the lock
+_lock_file = None
+
+
 def main():
+    global _lock_file
     parser = argparse.ArgumentParser(description="palace-daemon — MemPalace HTTP/MCP gateway")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Bind port (default: 8085)")
     parser.add_argument("--palace", default=DEFAULT_PALACE, help="Palace path (overrides mempalace config)")
     parser.add_argument("--api-key", default=API_KEY, help="API key for auth (optional)")
     args = parser.parse_args()
+
+    # Simple file lock to prevent multiple daemon instances
+    lock_file_path = "/tmp/palace-daemon.lock"
+    _lock_file = open(lock_file_path, "w")
+    try:
+        fcntl.lockf(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print("ERROR: Another instance of palace-daemon is already running.", file=sys.stderr)
+        sys.exit(1)
 
     if args.palace:
         os.environ["MEMPALACE_PALACE"] = args.palace

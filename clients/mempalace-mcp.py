@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+with open("/tmp/mcp_debug.log", "a") as f: f.write("SCRIPT STARTED\n")
 """
 mempalace-mcp — stdio MCP proxy for palace-daemon, with direct fallback
 
@@ -85,15 +86,6 @@ def run_daemon_mode(daemon_url: str):
     _stdio_loop(handle)
 
 
-def run_direct_mode():
-    import mempalace.mcp_server as _mp
-
-    def handle(request):
-        return _mp.handle_request(request) or {}
-
-    _stdio_loop(handle)
-
-
 def main():
     parser = argparse.ArgumentParser(description="MCP stdio proxy for palace-daemon")
     parser.add_argument("--daemon", default=DEFAULT_DAEMON, help="palace-daemon base URL")
@@ -105,11 +97,11 @@ def main():
         API_KEY = args.api_key
 
     if find_daemon(args.daemon):
-        print(f"palace-daemon: connected at {args.daemon}", file=sys.stderr)
+        print(f"palace-daemon: connected at {args.daemon}", file=open("/tmp/mcp_debug.log", "a"))
         run_daemon_mode(args.daemon)
     else:
-        print(f"palace-daemon: unreachable at {args.daemon}, falling back to direct mode", file=sys.stderr)
-        run_direct_mode()
+        print(f"ERROR: palace-daemon unreachable at {args.daemon}. Direct fallback disabled for safety.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,17 @@ An HTTP/MCP gateway for [MemPalace](https://github.com/MemPalace/mempalace) that
 
 When multiple clients hit MemPalace simultaneously — an AI agent, an Android app, a bulk import job — you want a single chokepoint that controls throughput and keeps mining jobs from starving live queries. palace-daemon provides this through three asyncio semaphores: a read semaphore (N concurrent), a write semaphore (N/2 concurrent), and a mine semaphore (1 at a time). MemPalace ≥3.3.2 handles correctness internally (WAL mode, KG instance lock, mine PID guard); the daemon handles coordination.
 
+## Stability & Concurrency
+
+> [!CAUTION]
+> **CRITICAL: NEVER mount the palace database via NFS/Samba for direct access.**
+> SQLite and ChromaDB are not network-safe. Direct access over a network mount will cause `SQLITE_IOERR`, HNSW index corruption, and permanent data loss. Always use `palace-daemon` over HTTP for remote access.
+
+### The "Daemon-Only" Policy
+To prevent database corruption, this project enforces a strict **Single-Process Access** model:
+1.  **Daemon Lock:** `main.py` uses a file lock (`/tmp/palace-daemon.lock`) to prevent multiple daemon instances from fighting over the database.
+2.  **No Client Fallback:** The `mempalace-mcp.py` client is hard-coded to **fail** if it cannot reach the daemon. It will no longer attempt to open the database files directly. This ensures that your MCP client never accidentally creates a "split-brain" scenario where two processes are writing to the same SQLite file.
+
 ## Features
 
 - **MCP proxy** — any MCP client connects to /mcp instead of spawning a local process
@@ -127,7 +138,7 @@ Claude Code setup (`~/.claude.json` → `mcpServers`):
 
 With API key: pass `--api-key your-secret` or set `PALACE_API_KEY` env var.
 
-**Fallback mode:** if the daemon is unreachable at startup, the client automatically falls back to importing `mempalace.mcp_server` in-process. Tools keep working — a warning is printed to stderr.
+**Safety First:** If the daemon is unreachable, the client will exit with an error rather than falling back to direct database access. This prevents concurrent access conflicts and ensures stability.
 
 ## Architecture
 
