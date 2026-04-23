@@ -5,6 +5,11 @@ Three semaphores govern concurrency (all tunable via PALACE_MAX_CONCURRENCY):
   _read_sem  — up to N concurrent read-only ops (search, query, stats, …)
   _write_sem — up to N//2 concurrent write ops (add, update, kg mutations, …)
   _mine_sem  — one mine job at a time, independent of reads/writes
+
+Roadmap:
+  [HIGH] Verified Backups: /backup endpoint with integrity_check + smoke test retrieval.
+  [HIGH] AAAK Compaction: On-demand batch processing of raw logs into AAAK.
+  [MED]  Maintenance: Automate _READ_TOOLS sync with upstream mempalace.
 """
 import argparse
 import asyncio
