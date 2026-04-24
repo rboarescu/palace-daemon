@@ -4,26 +4,16 @@ After=network.target
 
 [Service]
 Type=simple
-# EDIT: set to your username
 User=radu
-# EDIT: set to the directory where main.py lives
 WorkingDirectory=/home/radu/palace-daemon
-# Ensure the port is free before starting
 ExecStartPre=-/usr/bin/fuser -k 8085/tcp
-# EDIT: set to your mempalace venv python (find with: pipx environment --value PIPX_LOCAL_VENVS)/mempalace/bin/python
+ExecStartPre=-/usr/bin/rm -f /tmp/palace-daemon-8085.lock
 ExecStart=/home/radu/.local/share/pipx/venvs/mempalace/bin/python main.py
-# Global consistency
-Environment=PALACE_PORT=8085
-Environment=MEMPALACE_PALACE=/home/radu/.mempalace/palace
-# EDIT: uncomment and tune concurrency (default: 4 reads, 2 writes)
-# Environment=PALACE_MAX_CONCURRENCY=4
-# EDIT: uncomment to require an API key on all requests
-# Environment=PALACE_API_KEY=your-secret
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-KillMode=mixed
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
