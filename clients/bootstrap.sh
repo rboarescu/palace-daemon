@@ -142,11 +142,11 @@ d.setdefault("mcpServers", {})["mempalace"] = {
 }
 d["hooks"] = {
     "SessionStart": [{"name": "mempalace-session-start", "type": "command",
-        "command": "python3", "args": [hook_py, "--hook", "session-start", "--harness", "codex"]}],
+        "command": "python3", "args": [hook_py, "--hook", "session-start", "--harness", "gemini-cli"]}],
     "SessionEnd": [{"name": "mempalace-session-stop", "type": "command",
-        "command": "python3", "args": [hook_py, "--hook", "stop", "--harness", "codex"]}],
+        "command": "python3", "args": [hook_py, "--hook", "stop", "--harness", "gemini-cli"]}],
     "PreCompact": [{"name": "mempalace-precompact", "type": "command",
-        "command": "python3", "args": [hook_py, "--hook", "precompact", "--harness", "codex"],
+        "command": "python3", "args": [hook_py, "--hook", "precompact", "--harness", "gemini-cli"],
         "timeout": 30}]
 }
 with open(path, "w") as f:
