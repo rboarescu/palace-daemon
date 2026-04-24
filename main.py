@@ -8,7 +8,8 @@ Three semaphores govern concurrency (all tunable via PALACE_MAX_CONCURRENCY):
 
 Roadmap:
   [HIGH] Verified Backups: /backup endpoint with integrity_check + smoke test retrieval.
-  [HIGH] Stability: Auto-detect "Internal Error" during search and trigger index recovery.
+  [DONE] Stability: Auto-detect "Internal Error" during search and trigger index recovery.
+  [DONE] Flush: Ensure memories are checkpointed on shutdown and via /flush.
   [HIGH] Unified Routing: Ensure all clients (including miners/compactors) use the Daemon API.
   [MED]  Maintenance: Automate _READ_TOOLS sync with upstream mempalace.
 """
@@ -33,7 +34,7 @@ from mempalace.backends.chroma import quarantine_stale_hnsw
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.2.0"
+VERSION = "1.4.1"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -86,17 +87,44 @@ def _sem_for(request_dict: dict) -> asyncio.Semaphore:
     return _read_sem if tool_name in _READ_TOOLS else _write_sem
 
 
-async def _call(request_dict: dict) -> dict:
+async def _auto_repair():
+    """Trigger index recovery and reload the mempalace client."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    loop = asyncio.get_running_loop()
+    palace_path = _mp._config.palace_path
+    moved = await loop.run_in_executor(None, quarantine_stale_hnsw, palace_path)
+    if moved:
+        logger.warning("AUTO-REPAIR: Quarantined %d stale HNSW segments. Reloading client.", len(moved))
+        # Clear client cache to force a fresh PersistentClient (which triggers rebuild)
+        _mp._client_cache = None
+        _mp._collection_cache = None
+        return len(moved)
+    
+    logger.info("AUTO-REPAIR: No stale segments found during scan.")
+    return 0
+
+
+async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
     async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(None, _mp.handle_request, request_dict)
+            
             if result and "error" in result:
                 msg = str(result["error"].get("message", ""))
-                if "Internal error: Error finding id" in msg or "Internal error: id" in msg:
-                    # Self-healing hint: This usually means HNSW index is stale.
-                    # We don't auto-repair here as it's destructive/slow, but we tag the error.
-                    result["error"]["message"] += " (Daemon hint: HNSW index stale. Run 'mempalace repair' or restart daemon to trigger auto-quarantine)"
+                is_hnsw_error = "Internal error: Error finding id" in msg or "Internal error: id" in msg
+                
+                if is_hnsw_error and retry_on_hnsw:
+                    # Auto-repair and retry ONCE
+                    repaired_count = await _auto_repair()
+                    if repaired_count > 0:
+                        # We retry the same request exactly once
+                        return await loop.run_in_executor(None, _mp.handle_request, request_dict)
+                    
+                    # Tag the error if repair didn't find anything or already retried
+                    result["error"]["message"] += " (Daemon hint: HNSW index stale. Auto-repair attempted but index might still be inconsistent)"
             return result or {}
         except Exception as e:
             return {"jsonrpc": "2.0", "id": request_dict.get("id"), "error": {"code": -32000, "message": str(e)}}
@@ -105,9 +133,11 @@ async def _call(request_dict: dict) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import logging
+    logger = logging.getLogger(__name__)
+    
     # Register signal handlers for graceful shutdown
     def handle_exit(sig, frame):
-        logging.getLogger(__name__).warning("Received signal %s, shutting down...", sig)
+        logger.warning("Received signal %s, shutting down...", sig)
         # _mp handles its own state, but we ensure the daemon stops accepting new tasks
         sys.exit(0)
     
@@ -116,11 +146,25 @@ async def lifespan(app: FastAPI):
 
     moved = quarantine_stale_hnsw(_mp._config.palace_path)
     if moved:
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "Quarantined %d stale HNSW segment(s) — ChromaDB will rebuild indexes: %s",
             len(moved), moved,
         )
+    
     yield
+    
+    # --- Shutdown: Silent Save / Flush ---
+    logger.info("Lifespan: shutting down, flushing memories...")
+    try:
+        # We call mempalace_memories_filed_away which triggers a checkpoint in recent mempalace versions
+        await _call({
+            "jsonrpc": "2.0", "id": "shutdown",
+            "method": "tools/call",
+            "params": {"name": "mempalace_memories_filed_away", "arguments": {}}
+        }, retry_on_hnsw=False)
+        logger.info("Flush complete.")
+    except Exception as e:
+        logger.error("Error during shutdown flush: %s", e)
 
 
 app = FastAPI(title="palace-daemon", lifespan=lifespan)
@@ -202,49 +246,16 @@ async def stats(x_api_key: str | None = Header(default=None)):
     return {"kg": kg, "graph": graph, "status": status}
 
 
-# ── Mine endpoint (serialized bulk import) ────────────────────────────────────
-
-@app.post("/mine")
-async def mine(request: Request, x_api_key: str | None = Header(default=None)):
-    """
-    Run mempalace mine under _mine_sem (one job at a time). Normal read/write
-    traffic continues unblocked during the job; mempalace ≥3.3.2 enforces
-    its own mine lock at the library level.
-
-    Body: { "dir": "/path/to/files", "wing": "general", "mode": "convos",
-            "extract": "exchange", "limit": 100 }
-    """
+@app.post("/flush")
+async def flush_palace(x_api_key: str | None = Header(default=None)):
+    """Manually trigger a checkpoint/flush of memories to disk."""
     _check_auth(x_api_key)
-    body = await request.json()
-    directory = body.get("dir")
-    if not directory:
-        raise HTTPException(status_code=400, detail="'dir' is required")
-
-    wing = body.get("wing", "general")
-    mode = body.get("mode", "convos")
-    extract = body.get("extract")
-    limit = body.get("limit")
-
-    mempalace_bin = os.path.join(os.path.dirname(sys.executable), "mempalace")
-    cmd = [mempalace_bin, "mine", directory, "--mode", mode, "--wing", wing]
-    if extract:
-        cmd += ["--extract", extract]
-    if limit:
-        cmd += ["--limit", str(limit)]
-
-    async with _mine_sem:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-    return {
-        "returncode": proc.returncode,
-        "stdout": stdout.decode(),
-        "stderr": stderr.decode(),
-    }
+    result = await _call({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": "mempalace_memories_filed_away", "arguments": {}},
+    })
+    return _unwrap(result)
 
 
 @app.post("/reload")
@@ -306,6 +317,51 @@ async def create_backup(x_api_key: str | None = Header(default=None)):
             raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
 
 
+# ── Mine endpoint (serialized bulk import) ────────────────────────────────────
+
+@app.post("/mine")
+async def mine(request: Request, x_api_key: str | None = Header(default=None)):
+    """
+    Run mempalace mine under _mine_sem (one job at a time). Normal read/write
+    traffic continues unblocked during the job; mempalace ≥3.3.2 enforces
+    its own mine lock at the library level.
+
+    Body: { "dir": "/path/to/files", "wing": "general", "mode": "convos",
+            "extract": "exchange", "limit": 100 }
+    """
+    _check_auth(x_api_key)
+    body = await request.json()
+    directory = body.get("dir")
+    if not directory:
+        raise HTTPException(status_code=400, detail="'dir' is required")
+
+    wing = body.get("wing", "general")
+    mode = body.get("mode", "convos")
+    extract = body.get("extract")
+    limit = body.get("limit")
+
+    mempalace_bin = os.path.join(os.path.dirname(sys.executable), "mempalace")
+    cmd = [mempalace_bin, "mine", directory, "--mode", mode, "--wing", wing]
+    if extract:
+        cmd += ["--extract", extract]
+    if limit:
+        cmd += ["--limit", str(limit)]
+
+    async with _mine_sem:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+
+    return {
+        "returncode": proc.returncode,
+        "stdout": stdout.decode(),
+        "stderr": stderr.decode(),
+    }
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _unwrap(mcp_response: dict) -> Any:
@@ -331,13 +387,13 @@ def main():
     parser.add_argument("--api-key", default=API_KEY, help="API key for auth (optional)")
     args = parser.parse_args()
 
-    # Simple file lock to prevent multiple daemon instances
-    lock_file_path = "/tmp/palace-daemon.lock"
+    # Simple file lock to prevent multiple daemon instances on the same port
+    lock_file_path = f"/tmp/palace-daemon-{args.port}.lock"
     _lock_file = open(lock_file_path, "w")
     try:
         fcntl.lockf(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
-        print("ERROR: Another instance of palace-daemon is already running.", file=sys.stderr)
+        print(f"ERROR: Another instance of palace-daemon is already running on port {args.port}.", file=sys.stderr)
         sys.exit(1)
 
     if args.palace:
