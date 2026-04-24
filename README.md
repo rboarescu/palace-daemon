@@ -60,18 +60,32 @@ For local network use, leaving auth disabled is fine. For remote access, always 
 
 ## systemd
 
-### User service (Recommended)
+### System service (Recommended for servers)
+
+Starts at boot, before any user session. Use this on Artemis or any always-on host.
+
+    sudo cp palace-daemon.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now palace-daemon
+
+### User service (desktops / dev machines only)
+
+Only runs while you're logged in. Use this if you don't have sudo or only need the daemon during your session.
 
     mkdir -p ~/.config/systemd/user/
     cp palace-daemon.service ~/.config/systemd/user/
     systemctl --user daemon-reload
     systemctl --user enable --now palace-daemon
 
-### Global service
-
-    sudo cp palace-daemon.service /etc/systemd/system/
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now palace-daemon
+> [!WARNING]
+> **Never install both.** Running a system service and a user service simultaneously causes a port 8085 collision — the second instance will crash-loop with "Another instance already running". Pick one and remove the other.
+>
+> To remove a previously installed user service:
+>
+>     systemctl --user stop palace-daemon
+>     systemctl --user disable palace-daemon
+>     rm ~/.config/systemd/user/palace-daemon.service
+>     systemctl --user daemon-reload
 
 Edit `palace-daemon.service` to set `PALACE_API_KEY` or a custom `--palace` path before installing.
 
@@ -80,9 +94,14 @@ Edit `palace-daemon.service` to set `PALACE_API_KEY` or a custom `--palace` path
 ### Port 8085 already in use
 If the daemon fails to start with `[Errno 98] address already in use`, it usually means a previous instance didn't shut down cleanly.
 
-The included `palace-daemon.service` uses `ExecStartPre=-/usr/bin/fuser -k 8085/tcp` to automatically clear the port before starting. If running manually, you can clear it with:
+`palace-daemon.service` includes two `ExecStartPre` guards that run automatically on every start:
 
-    fuser -k 8085/tcp
+    ExecStartPre=-/usr/bin/fuser -k 8085/tcp
+    ExecStartPre=-/usr/bin/rm -f /tmp/palace-daemon-8085.lock
+
+The `-` prefix means failures are ignored (i.e. if nothing is blocking, these are no-ops). If running manually without systemd:
+
+    fuser -k 8085/tcp && rm -f /tmp/palace-daemon-8085.lock
 
 ## API
 
