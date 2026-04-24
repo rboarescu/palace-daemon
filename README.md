@@ -154,13 +154,13 @@ stdlib-only — only Artemis (the host) needs `pipx install mempalace`.
 
 ```bash
 # Copy from Artemis and run
-scp radu@192.168.0.42:/home/radu/palace-daemon/clients/bootstrap.sh ~/bootstrap.sh
+scp user@10.0.0.5:/home/user/palace-daemon/clients/bootstrap.sh ~/bootstrap.sh
 
 # Wire a single tool
-bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool claude-code
+bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool claude-code
 
 # Wire everything
-bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool all
+bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool all
 ```
 
 `--tool` values: `claude-code` | `gemini` | `vscode` | `cursor` | `jetbrains` | `all`
@@ -168,7 +168,7 @@ bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool all
 Files are installed to `~/.local/share/mempalace/`. After running, verify:
 
 ```bash
-curl http://192.168.0.42:8085/health
+curl http://10.0.0.5:8085/health
 ```
 
 ### hook.py — stdlib hook runner
@@ -236,7 +236,7 @@ Example (remote client pointing at Artemis):
 {
   "silent_save": true,
   "desktop_toast": false,
-  "daemon_url": "http://192.168.0.42:8085"
+  "daemon_url": "http://10.0.0.5:8085"
 }
 ```
 

@@ -4,8 +4,8 @@
 # into the requested AI tools, pointing at a remote palace-daemon.
 #
 # Usage:
-#   bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool claude-code
-#   bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool all
+#   bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool claude-code
+#   bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool all
 #
 # --tool options: claude-code | gemini | vscode | cursor | jetbrains | all
 #
@@ -16,14 +16,15 @@ set -euo pipefail
 
 DAEMON_URL=""
 TOOL=""
-ARTEMIS_HOST="radu@192.168.0.42"
-ARTEMIS_CLIENTS_PATH="/home/radu/palace-daemon/clients"
+# Default host and path (can be overridden via ENV)
+ARTEMIS_HOST="${ARTEMIS_HOST:-user@daemon-host}"
+ARTEMIS_CLIENTS_PATH="${ARTEMIS_CLIENTS_PATH:-/path/to/palace-daemon/clients}"
 INSTALL_DIR="$HOME/.local/share/mempalace"
 HOOK_SETTINGS="$HOME/.mempalace/hook_settings.json"
 
 usage() {
     echo "Usage: $0 --daemon <url> --tool <tool>"
-    echo "  --daemon  palace-daemon URL (e.g. http://192.168.0.42:8085)"
+    echo "  --daemon  palace-daemon URL (e.g. http://10.0.0.5:8085)"
     echo "  --tool    one of: claude-code | gemini | vscode | cursor | jetbrains | all"
     exit 1
 }
@@ -43,8 +44,10 @@ done
 mkdir -p "$INSTALL_DIR"
 
 echo "→ Copying mempalace-mcp.py and hook.py from Artemis..."
-scp "$ARTEMIS_HOST:$ARTEMIS_CLIENTS_PATH/mempalace-mcp.py" "$INSTALL_DIR/mempalace-mcp.py"
-scp "$ARTEMIS_HOST:$ARTEMIS_CLIENTS_PATH/hook.py"          "$INSTALL_DIR/hook.py"
+scp "$ARTEMIS_HOST:$ARTEMIS_CLIENTS_PATH/mempalace-mcp.py" "$INSTALL_DIR/mempalace-mcp.py" \
+    || { echo "ERROR: scp failed for mempalace-mcp.py — check ARTEMIS_HOST ($ARTEMIS_HOST) and connectivity"; exit 1; }
+scp "$ARTEMIS_HOST:$ARTEMIS_CLIENTS_PATH/hook.py"          "$INSTALL_DIR/hook.py" \
+    || { echo "ERROR: scp failed for hook.py — check ARTEMIS_HOST ($ARTEMIS_HOST) and connectivity"; exit 1; }
 chmod +x "$INSTALL_DIR/mempalace-mcp.py" "$INSTALL_DIR/hook.py"
 echo "   Installed to $INSTALL_DIR"
 

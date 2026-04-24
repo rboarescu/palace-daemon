@@ -7,8 +7,8 @@ Usage:
     python3 purge_wings.py [--dry-run] wing1 [wing2 ...]
 
 Example:
-    python3 purge_wings.py --dry-run -- -home-radu -home-radu-palace-daemon wing_geminicli
-    python3 purge_wings.py -- -home-radu -home-radu-palace-daemon wing_geminicli
+    python3 purge_wings.py --dry-run -- -home-user -home-user-palace-daemon wing_geminicli
+    python3 purge_wings.py -- -home-user -home-user-palace-daemon wing_geminicli
 """
 
 import argparse

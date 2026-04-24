@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-with open("/tmp/mcp_debug.log", "a") as f: f.write("SCRIPT STARTED\n")
 """
-mempalace-mcp — stdio MCP proxy for palace-daemon, with direct fallback
+mempalace-mcp — stdio MCP proxy for palace-daemon
 
 Primary mode: bridges MCP client → palace-daemon over HTTP (serialized,
 semaphore-protected, all clients coordinated through one chokepoint).
 
-Fallback mode: if the daemon is unreachable at startup, imports
-mempalace.mcp_server directly and handles requests in-process (same as
-the plain direct setup, minus the daemon's concurrency guarantees).
+Safety mode: if the daemon is unreachable at startup, the client exits
+with an error. Direct database access is disabled to prevent "split-brain"
+concurrency issues and SQLite corruption.
 
 Usage:
-    python mempalace-mcp.py --daemon http://192.168.0.42:8085
-    PALACE_DAEMON_URL=http://192.168.0.42:8085 python mempalace-mcp.py
+    python mempalace-mcp.py --daemon http://localhost:8085
+    PALACE_DAEMON_URL=http://localhost:8085 python mempalace-mcp.py
 
 Claude Code setup (~/.claude.json mcpServers):
     {
       "mempalace": {
         "type": "stdio",
-        "command": "/path/to/venv/python",
+        "command": "python3",
         "args": ["/path/to/mempalace-mcp.py", "--daemon", "http://localhost:8085"]
       }
     }
@@ -97,7 +96,8 @@ def main():
         API_KEY = args.api_key
 
     if find_daemon(args.daemon):
-        print(f"palace-daemon: connected at {args.daemon}", file=open("/tmp/mcp_debug.log", "a"))
+        # Log connection success to stderr so it doesn't break JSON-RPC stdout
+        print(f"palace-daemon: connected at {args.daemon}", file=sys.stderr)
         run_daemon_mode(args.daemon)
     else:
         print(f"ERROR: palace-daemon unreachable at {args.daemon}. Direct fallback disabled for safety.", file=sys.stderr)

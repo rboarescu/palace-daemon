@@ -1,3 +1,9 @@
+# Logs and local config
+*.log
+.gemini/
+.claude/
+
+# Python
 __pycache__/
 *.py[cod]
 mempalace.yaml

@@ -77,10 +77,10 @@ Switch from `mempalace hook run` to `palace-daemon/clients/hook.py`.
 {
   "hooks": {
     "Stop": [{"hooks": [{"type": "command",
-      "command": "python3 /home/radu/palace-daemon/clients/hook.py --hook stop --harness claude-code",
+      "command": "python3 /home/user/palace-daemon/clients/hook.py --hook stop --harness claude-code",
       "timeout": 30}]}],
     "PreCompact": [{"hooks": [{"type": "command",
-      "command": "python3 /home/radu/palace-daemon/clients/hook.py --hook precompact --harness claude-code",
+      "command": "python3 /home/user/palace-daemon/clients/hook.py --hook precompact --harness claude-code",
       "timeout": 60}]}]
   }
 }
@@ -91,13 +91,13 @@ Switch from `mempalace hook run` to `palace-daemon/clients/hook.py`.
 "hooks": {
   "SessionStart": [{"name": "mempalace-session-start", "type": "command",
     "command": "python3",
-    "args": ["/home/radu/palace-daemon/clients/hook.py", "--hook", "session-start", "--harness", "codex"]}],
+    "args": ["/home/user/palace-daemon/clients/hook.py", "--hook", "session-start", "--harness", "codex"]}],
   "SessionEnd": [{"name": "mempalace-session-stop", "type": "command",
     "command": "python3",
-    "args": ["/home/radu/palace-daemon/clients/hook.py", "--hook", "stop", "--harness", "codex"]}],
+    "args": ["/home/user/palace-daemon/clients/hook.py", "--hook", "stop", "--harness", "codex"]}],
   "PreCompact": [{"name": "mempalace-precompact", "type": "command",
     "command": "python3",
-    "args": ["/home/radu/palace-daemon/clients/hook.py", "--hook", "precompact", "--harness", "codex"],
+    "args": ["/home/user/palace-daemon/clients/hook.py", "--hook", "precompact", "--harness", "codex"],
     "timeout": 30}]
 }
 ```
@@ -113,7 +113,7 @@ Switch from `mempalace hook run` to `palace-daemon/clients/hook.py`.
   "daemon_url": "http://localhost:8085"
 }
 ```
-(Currently has `192.168.0.42:8085` — normalise to localhost for the host machine.)
+(Currently has `10.0.0.5:8085` — normalise to localhost for the host machine.)
 
 ---
 
@@ -126,9 +126,9 @@ Runs on any client machine (Linux/macOS). Installs the MCP client and configures
 ### Usage
 ```bash
 # scp from Artemis first, or fetch via curl if you add a /clients static route later
-scp radu@192.168.0.42:/home/radu/palace-daemon/clients/bootstrap.sh ~/bootstrap.sh
-bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool claude-code
-bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool all
+scp user@10.0.0.5:/home/user/palace-daemon/clients/bootstrap.sh ~/bootstrap.sh
+bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool claude-code
+bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool all
 ```
 
 ### What it does
@@ -197,6 +197,6 @@ For MCP-only tools: bootstrap writes only the mcpServers block.
 5. Stop daemon: hook fires, passes through silently
 
 ### Bootstrap
-1. Run on a second LAN machine: `bash bootstrap.sh --daemon http://192.168.0.42:8085 --tool claude-code`
+1. Run on a second LAN machine: `bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool claude-code`
 2. Open Claude Code; confirm mempalace MCP tools visible
 3. Run `mempalace_search "test"` → response comes from Artemis palace

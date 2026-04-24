@@ -23,6 +23,7 @@ import fcntl
 import signal
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -34,7 +35,7 @@ from mempalace.backends.chroma import quarantine_stale_hnsw
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -116,15 +117,16 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
                 msg = str(result["error"].get("message", ""))
                 is_hnsw_error = "Internal error: Error finding id" in msg or "Internal error: id" in msg
                 
-                if is_hnsw_error and retry_on_hnsw:
-                    # Auto-repair and retry ONCE
+                tool_name = request_dict.get("params", {}).get("name", "")
+                if is_hnsw_error and retry_on_hnsw and tool_name in _READ_TOOLS:
+                    # Auto-repair and retry ONCE (write ops are excluded: retrying risks duplicate drawers)
                     repaired_count = await _auto_repair()
                     if repaired_count > 0:
-                        # We retry the same request exactly once
                         return await loop.run_in_executor(None, _mp.handle_request, request_dict)
-                    
-                    # Tag the error if repair didn't find anything or already retried
+
                     result["error"]["message"] += " (Daemon hint: HNSW index stale. Auto-repair attempted but index might still be inconsistent)"
+                elif is_hnsw_error and tool_name not in _READ_TOOLS:
+                    result["error"]["message"] += " (Daemon hint: HNSW error on write op — manual /reload may be needed)"
             return result or {}
         except Exception as e:
             return {"jsonrpc": "2.0", "id": request_dict.get("id"), "error": {"code": -32000, "message": str(e)}}
@@ -277,36 +279,36 @@ async def create_backup(x_api_key: str | None = Header(default=None)):
     palace_path = _mp._config.palace_path
     db_path = os.path.join(palace_path, "chroma.sqlite3")
     
-    # Create backup directory if it doesn't exist
     backup_dir = os.path.join(os.path.dirname(palace_path), "palace.backup")
-    os.makedirs(backup_dir, exist_ok=True)
-    
+    os.makedirs(backup_dir, mode=0o700, exist_ok=True)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(backup_dir, f"chroma.sqlite3.{timestamp}.bak")
-    
-    # We hold the write semaphore to ensure no daemon-driven writes happen during backup start
+
+    # Hold the write semaphore so no daemon-driven writes race the backup start.
     async with _write_sem:
         try:
-            # 1. Atomic Backup
             src = sqlite3.connect(db_path)
             dst = sqlite3.connect(backup_path)
-            with dst:
+            try:
                 src.backup(dst)
-            dst.close()
-            src.close()
-            
-            # 2. Integrity Check
+            finally:
+                dst.close()
+                src.close()
+
             check = sqlite3.connect(backup_path)
-            cursor = check.cursor()
-            cursor.execute("PRAGMA integrity_check;")
-            status = cursor.fetchone()[0]
-            check.close()
-            
+            try:
+                cursor = check.cursor()
+                cursor.execute("PRAGMA integrity_check;")
+                status = cursor.fetchone()[0]
+            finally:
+                check.close()
+
             if status != "ok":
                 if os.path.exists(backup_path):
                     os.remove(backup_path)
                 raise Exception(f"Integrity check failed: {status}")
-                
+
             return {
                 "status": "success",
                 "backup_file": backup_path,
@@ -335,10 +337,30 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
     if not directory:
         raise HTTPException(status_code=400, detail="'dir' is required")
 
+    dir_path = Path(directory)
+    if not dir_path.is_absolute() or ".." in dir_path.parts:
+        raise HTTPException(status_code=400, detail="'dir' must be an absolute path with no traversal")
+    if not dir_path.exists():
+        raise HTTPException(status_code=400, detail=f"Directory does not exist: {directory}")
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {directory}")
+
     wing = body.get("wing", "general")
     mode = body.get("mode", "convos")
     extract = body.get("extract")
     limit = body.get("limit")
+
+    _VALID_MODES = {"convos", "projects"}
+    _VALID_EXTRACTS = {"exchange", "general"}
+    if mode not in _VALID_MODES:
+        raise HTTPException(status_code=400, detail=f"'mode' must be one of: {', '.join(_VALID_MODES)}")
+    if extract is not None and extract not in _VALID_EXTRACTS:
+        raise HTTPException(status_code=400, detail=f"'extract' must be one of: {', '.join(_VALID_EXTRACTS)}")
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="'limit' must be an integer")
 
     mempalace_bin = os.path.join(os.path.dirname(sys.executable), "mempalace")
     cmd = [mempalace_bin, "mine", directory, "--mode", mode, "--wing", wing]
@@ -387,8 +409,11 @@ def main():
     parser.add_argument("--api-key", default=API_KEY, help="API key for auth (optional)")
     args = parser.parse_args()
 
-    # Simple file lock to prevent multiple daemon instances on the same port
-    lock_file_path = f"/tmp/palace-daemon-{args.port}.lock"
+    # Simple file lock to prevent multiple daemon instances on the same port.
+    # Use ~/.cache/palace-daemon/ (mode 0o700) instead of /tmp to avoid world-writable exposure.
+    lock_dir = Path.home() / ".cache" / "palace-daemon"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_file_path = str(lock_dir / f"daemon-{args.port}.lock")
     _lock_file = open(lock_file_path, "w")
     try:
         fcntl.lockf(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)

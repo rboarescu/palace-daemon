@@ -4,11 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=radu
-WorkingDirectory=/home/radu/palace-daemon
+User=user
+WorkingDirectory=/home/user/palace-daemon
 ExecStartPre=-/usr/bin/fuser -k 8085/tcp
-ExecStartPre=-/usr/bin/rm -f /tmp/palace-daemon-8085.lock
-ExecStart=/home/radu/.local/share/pipx/venvs/mempalace/bin/python main.py
+ExecStartPre=-/usr/bin/rm -f /home/user/.cache/palace-daemon/daemon-8085.lock
+ExecStart=/home/user/.local/share/pipx/venvs/mempalace/bin/python main.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
