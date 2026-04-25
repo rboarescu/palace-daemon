@@ -14,17 +14,19 @@ When multiple clients hit MemPalace simultaneously — an AI agent, an Android a
 
 ### The "Daemon-Only" Policy
 To prevent database corruption, this project enforces a strict **Single-Process Access** model:
-1.  **Daemon Lock:** `main.py` uses a file lock (`/tmp/palace-daemon.lock`) to prevent multiple daemon instances from fighting over the database.
-2.  **No Client Fallback:** The `mempalace-mcp.py` client is hard-coded to **fail** if it cannot reach the daemon. It will no longer attempt to open the database files directly. This ensures that your MCP client never accidentally creates a "split-brain" scenario where two processes are writing to the same SQLite file.
+1.  **Daemon Lock:** `main.py` uses a file lock (`/tmp/palace-daemon-{port}.lock`) to prevent multiple daemon instances from fighting over the database.
+2.  **Systemd-First:** Manual startup is blocked by default to prevent "split-brain" scenarios between a system service and an agent's manual process.
+3.  **No Client Fallback:** The `mempalace-mcp.py` client is hard-coded to **fail** if it cannot reach the daemon. It will no longer attempt to open the database files directly.
 
 ## Features
 
+- **Self-Healing Startup** — `--force` flag automatically clears stale processes on the target port
+- **Protected Manual Start** — requires `--manual` flag for debugging, preventing accidental agent starts
 - **MCP proxy** — any MCP client connects to /mcp instead of spawning a local process
 - **REST API** — search, store, and query the palace over HTTP (Android app, netdash, scripts)
-- **Concurrent access control** — three semaphores coordinate reads, writes, and mine jobs; tunable via `PALACE_MAX_CONCURRENCY`
+- **Concurrent access control** — three semaphores coordinate reads, writes, and mine jobs; tunable via `PALACE_MAX_READ_CONCURRENCY` / `PALACE_MAX_WRITE_CONCURRENCY`
 - **Isolated mining** — /mine runs under its own semaphore so bulk imports never stall live traffic
 - **Optional API key auth** — set `PALACE_API_KEY` to protect all write endpoints
-- **Configurable** — host, port, palace path via CLI args or env vars
 
 ## Requirements
 
@@ -35,17 +37,17 @@ To prevent database corruption, this project enforces a strict **Single-Process 
 
 ## Usage
 
-    # Basic start
-    python main.py
+    # Recommended: Use systemctl (see systemd section)
+    sudo systemctl start palace-daemon
 
-    # Custom palace path and port
-    python main.py --palace ~/.mempalace/palace --port 8085
+    # Manual start (Debugging only)
+    python main.py --manual --palace ~/.mempalace/palace --port 8085
+
+    # Force start (Clears port 8085 first)
+    python main.py --manual --force
 
     # With API key auth
-    PALACE_API_KEY=your-secret python main.py
-
-    # Higher concurrency (default: 4 reads, 2 writes)
-    PALACE_MAX_CONCURRENCY=8 python main.py
+    PALACE_API_KEY=your-secret python main.py --manual
 
 
 ## Security
@@ -94,14 +96,14 @@ Edit `palace-daemon.service` to set `PALACE_API_KEY` or a custom `--palace` path
 ### Port 8085 already in use
 If the daemon fails to start with `[Errno 98] address already in use`, it usually means a previous instance didn't shut down cleanly.
 
-`palace-daemon.service` includes two `ExecStartPre` guards that run automatically on every start:
+`palace-daemon.service` includes an `ExecStart` command that uses `--force` to clear the port automatically. If running manually, use the `--force` flag:
 
-    ExecStartPre=-/usr/bin/fuser -k 8085/tcp
-    ExecStartPre=-/usr/bin/rm -f /tmp/palace-daemon-8085.lock
+    python main.py --manual --force
 
-The `-` prefix means failures are ignored (i.e. if nothing is blocking, these are no-ops). If running manually without systemd:
+To manually clear the lock and port without starting:
 
-    fuser -k 8085/tcp && rm -f /tmp/palace-daemon-8085.lock
+    fuser -k 8085/tcp && rm -f ~/.cache/palace-daemon/daemon-8085.lock
+
 
 ## API
 
@@ -195,7 +197,7 @@ Pass X-Api-Key: your-secret header on all requests except /health.
 | Tool | Config file(s) | Has hooks? |
 |---|---|---|
 | claude-code | `~/.claude.json` (mcpServers) + `~/.claude/settings.json` (hooks) | Yes (Stop, PreCompact) |
-| gemini | `~/.gemini/settings.json` | Yes (SessionStart, SessionEnd, PreCompact) |
+| gemini | `~/.gemini/settings.json` | Yes (SessionStart, SessionEnd, PreCompress) |
 | vscode | `~/.vscode/mcp.json` | No |
 | cursor | `~/.cursor/mcp.json` | No |
 | jetbrains | `~/.config/JetBrains/<IDE>/mcp.json` (Linux) or `~/Library/Application Support/JetBrains/<IDE>/mcp.json` (macOS) | No |
@@ -245,8 +247,8 @@ python3 hook.py --hook session-start --harness codex
 
 | Hook | What it does |
 |---|---|
-| `session-start` | Initialises state dir; passes through |
-| `stop` | Counts exchanges; at every 15th — triggers mine approval block or silent diary save depending on `silent_save` |
+| `session-start` | Initialises state dir; seeds the per-session save timestamp; prunes state files older than 7 days |
+| `stop` | Three independent save triggers (any one fires): **count** — every 15 exchanges; **time** — every 5 min with unsaved exchanges; **force** — `force_on_stop=true` saves whenever any exchanges are unsaved and ≥`force_min_interval` s have passed (catches short session-end stops). Triggers mine approval block or silent diary save depending on `silent_save`. |
 | `precompact` | If `MEMPAL_DIR` set, fires `POST /mine` immediately (no approval — compaction is imminent); passes through |
 
 #### Mine routing
@@ -275,6 +277,8 @@ Show the user this directory and ask them to approve or deny mining it into the 
 | `daemon_url` | `http://localhost:8085` | URL of palace-daemon; use the LAN IP on remote clients |
 | `silent_save` | `true` | If true, auto-saves diary entry via daemon and passes through; if false, blocks and asks the AI to save manually |
 | `desktop_toast` | `false` | Fire `notify-send` on save triggers (useful on desktops, skip on SSH) |
+| `force_on_stop` | `true` | Save on every Stop where unsaved exchanges exist and ≥`force_min_interval` s have passed — ensures session-end stops are never missed |
+| `force_min_interval` | `60` | Minimum seconds between `force_on_stop` saves; prevents a diary write after every single response |
 
 Example (Artemis host):
 
@@ -317,11 +321,11 @@ Example (remote client pointing at Artemis):
 {
   "hooks": {
     "SessionStart": [{"name": "mempalace-session-start", "type": "command",
-      "command": "python3", "args": ["/path/to/hook.py", "--hook", "session-start", "--harness", "codex"]}],
+      "command": "python3", "args": ["/path/to/hook.py", "--hook", "session-start", "--harness", "gemini-cli"]}],
     "SessionEnd": [{"name": "mempalace-session-stop", "type": "command",
-      "command": "python3", "args": ["/path/to/hook.py", "--hook", "stop", "--harness", "codex"]}],
-    "PreCompact": [{"name": "mempalace-precompact", "type": "command",
-      "command": "python3", "args": ["/path/to/hook.py", "--hook", "precompact", "--harness", "codex"],
+      "command": "python3", "args": ["/path/to/hook.py", "--hook", "stop", "--harness", "gemini-cli"]}],
+    "PreCompress": [{"name": "mempalace-precompact", "type": "command",
+      "command": "python3", "args": ["/path/to/hook.py", "--hook", "precompact", "--harness", "gemini-cli"],
       "timeout": 30}]
   }
 }
@@ -354,26 +358,31 @@ With API key: pass `--api-key your-secret` or set `PALACE_API_KEY` env var.
 
 ## Testing & Development
 
-To test changes (like auto-healing or stress tests) without risking your production data or interfering with the primary daemon on port 8085, use a **Shadow Palace** via Docker.
+To test changes without risking production data or interfering with the primary daemon on port 8085, run a second container against a palace copy.
 
-### Shadow Palace (Docker)
+### Docker (testing + distribution)
 
-1. **Clone your data:**
-   ```bash
-   mkdir -p ~/.mempalace/test_palace
-   cp -r ~/.mempalace/palace/* ~/.mempalace/test_palace/
-   ```
+Build and run against a palace copy:
 
-2. **Run the test container:**
-   ```bash
-   docker compose -f docker-compose.test.yml up --build -d
-   ```
+```bash
+cp -r ~/.mempalace/palace ~/.mempalace/palace-test
+docker build -t palace-daemon:latest .
+docker run --rm \
+  -v ~/.mempalace/palace-test:/palace \
+  -p 8086:8085 \
+  palace-daemon:latest
+```
 
-This starts a fully isolated daemon on **port 8086** using your test data. It uses a separate lock file inside the container, ensuring it doesn't collide with your production `palace-daemon-terminal`.
+Or with docker compose (edit `PALACE_PATH` and `PALACE_PORT` in the environment first):
+
+```bash
+PALACE_PATH=~/.mempalace/palace-test PALACE_PORT=8086 docker compose up --build
+```
+
+The live daemon on port 8085 is never touched. The palace is always mounted as a volume — it is never baked into the image.
 
 ### Validation
 
-Check the health of your test instance:
 ```bash
 curl http://localhost:8086/health
 ```
@@ -385,9 +394,9 @@ curl http://localhost:8086/health
             |
             v
       palace-daemon (FastAPI)
-        ├── _read_sem(N)   — search, query, stats, …
-        ├── _write_sem(N/2) — add, update, kg mutations, …
-        └── _mine_sem(1)   — bulk import jobs
+        ├── _read_sem(PALACE_MAX_READ_CONCURRENCY)   — search, query, stats, …
+        ├── _write_sem(PALACE_MAX_WRITE_CONCURRENCY) — add, update, kg mutations, …
+        └── _mine_sem(1)                             — bulk import jobs
             |
             v
       mempalace.mcp_server

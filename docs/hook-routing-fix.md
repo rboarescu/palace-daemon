@@ -95,7 +95,7 @@ Switch from `mempalace hook run` to `palace-daemon/clients/hook.py`.
   "SessionEnd": [{"name": "mempalace-session-stop", "type": "command",
     "command": "python3",
     "args": ["/home/user/palace-daemon/clients/hook.py", "--hook", "stop", "--harness", "codex"]}],
-  "PreCompact": [{"name": "mempalace-precompact", "type": "command",
+  "PreCompress": [{"name": "mempalace-precompact", "type": "command",
     "command": "python3",
     "args": ["/home/user/palace-daemon/clients/hook.py", "--hook", "precompact", "--harness", "codex"],
     "timeout": 30}]
@@ -143,7 +143,7 @@ bash bootstrap.sh --daemon http://10.0.0.5:8085 --tool all
 | Tool | Config file | Has hooks? |
 |---|---|---|
 | claude-code | `~/.claude.json` (mcpServers) + `~/.claude/settings.json` (hooks) | Yes (Stop, PreCompact) |
-| gemini | `~/.gemini/settings.json` | Yes (SessionStart, SessionEnd, PreCompact) |
+| gemini | `~/.gemini/settings.json` | Yes (SessionStart, SessionEnd, PreCompress) |
 | vscode | `~/.vscode/mcp.json` | No |
 | cursor | `~/.cursor/mcp.json` | No |
 | jetbrains | `~/.config/JetBrains/<IDE>/mcp.json` (Linux) or `~/Library/Application Support/JetBrains/<IDE>/mcp.json` (macOS) | No |

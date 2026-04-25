@@ -145,7 +145,7 @@ d["hooks"] = {
         "command": "python3", "args": [hook_py, "--hook", "session-start", "--harness", "gemini-cli"]}],
     "SessionEnd": [{"name": "mempalace-session-stop", "type": "command",
         "command": "python3", "args": [hook_py, "--hook", "stop", "--harness", "gemini-cli"]}],
-    "PreCompact": [{"name": "mempalace-precompact", "type": "command",
+    "PreCompress": [{"name": "mempalace-precompact", "type": "command",
         "command": "python3", "args": [hook_py, "--hook", "precompact", "--harness", "gemini-cli"],
         "timeout": 30}]
 }

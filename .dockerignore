@@ -1,0 +1,15 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+daemon.log
+*.log
+clients/
+scripts/
+docs/
+*.md
+*.service
+*.yaml
+*.yml
+.claude/
+entities.json

@@ -15,9 +15,11 @@ Usage:
     python3 hook.py --hook session-start --harness codex
 
 Settings: ~/.mempalace/hook_settings.json
-    daemon_url    (default: http://localhost:8085)
-    silent_save   (default: true)  — pass through after diary save; false = block for manual save
-    desktop_toast (default: false) — fire notify-send on save triggers
+    daemon_url        (default: http://localhost:8085)
+    silent_save       (default: true)  — pass through after diary save; false = block for manual save
+    desktop_toast     (default: false) — fire notify-send on save triggers
+    force_on_stop     (default: true)  — save at session end even with few exchanges (≥FORCE_MIN_INTERVAL s between saves)
+    force_min_interval (default: 60)   — minimum seconds between force_on_stop saves
 """
 
 import argparse
@@ -26,11 +28,15 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-SAVE_INTERVAL = 15
+SAVE_INTERVAL = 15           # count-based: save every N exchanges
+TIME_SAVE_INTERVAL = 300     # time-based: save if this many seconds elapsed with unsaved exchanges
+FORCE_MIN_INTERVAL = 60      # force_on_stop: minimum seconds between saves (prevents per-response spam)
+CHECKPOINT_TOPIC = "checkpoint"  # keep in sync with main.py and mempal-fast.py — used by kind= search filter
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 HOOK_SETTINGS_PATH = Path.home() / ".mempalace" / "hook_settings.json"
 
@@ -111,6 +117,22 @@ def _log(message: str):
 
 def _output(data: dict):
     print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _read_last_save_ts(session_id: str) -> float:
+    ts_file = STATE_DIR / f"{session_id}_last_save_ts"
+    try:
+        return float(ts_file.read_text().strip())
+    except Exception:
+        return 0.0
+
+
+def _write_last_save_ts(session_id: str):
+    ts_file = STATE_DIR / f"{session_id}_last_save_ts"
+    try:
+        ts_file.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _load_hook_settings() -> dict:
@@ -224,10 +246,25 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
     }
 
 
+def _prune_state_files(max_age_days: int = 7):
+    cutoff = time.time() - max_age_days * 86400
+    try:
+        for f in STATE_DIR.iterdir():
+            if f.name in ("hook.log",):
+                continue
+            if f.suffix in ("", ) and f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def hook_session_start(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
-    _log(f"SESSION START for session {parsed['session_id']}")
+    session_id = parsed["session_id"]
+    _log(f"SESSION START for session {session_id}")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _write_last_save_ts(session_id)   # seed so first-stop time_trigger doesn't fire immediately
+    _prune_state_files()
     _output({})
 
 
@@ -253,20 +290,39 @@ def hook_stop(data: dict, harness: str):
             last_save = 0
 
     since_last = exchange_count - last_save
-    _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
+    last_save_ts = _read_last_save_ts(session_id)
+    time_since_last = time.time() - last_save_ts
 
-    if since_last < SAVE_INTERVAL or exchange_count == 0:
+    _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save, {time_since_last:.0f}s elapsed")
+
+    settings = _load_hook_settings()
+
+    # Three independent triggers — any one fires a save:
+    #   count   — every SAVE_INTERVAL exchanges (existing behaviour)
+    #   time    — every TIME_SAVE_INTERVAL seconds with unsaved exchanges (new)
+    #   force   — force_on_stop=true: save at session end even with few exchanges,
+    #             subject to FORCE_MIN_INTERVAL to prevent per-response spam
+    count_trigger = since_last >= SAVE_INTERVAL and exchange_count > 0
+    time_trigger  = time_since_last >= TIME_SAVE_INTERVAL and since_last > 0
+    force_trigger = (
+        settings.get("force_on_stop", True)
+        and since_last > 0
+        and time_since_last >= settings.get("force_min_interval", FORCE_MIN_INTERVAL)
+    )
+
+    if not (count_trigger or time_trigger or force_trigger):
         _output({})
         return
+
+    trigger = "count" if count_trigger else ("time" if time_trigger else "force")
+    _log(f"TRIGGERING SAVE at exchange {exchange_count} (trigger={trigger})")
 
     try:
         last_save_file.write_text(str(exchange_count), encoding="utf-8")
     except OSError:
         pass
+    _write_last_save_ts(session_id)
 
-    _log(f"TRIGGERING SAVE at exchange {exchange_count}")
-
-    settings = _load_hook_settings()
     daemon_url = settings.get("daemon_url", "http://localhost:8085")
     silent = settings.get("silent_save", True)
     toast = settings.get("desktop_toast", False)
@@ -281,15 +337,15 @@ def hook_stop(data: dict, harness: str):
 
     if silent:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.silent"
+        entry = f"AUTO-SAVE:{session_id}|{exchange_count}.msgs|{ts}|hook.{trigger}"
         ok = _post_mcp(daemon_url, "mempalace_diary_write", {
             "agent_name": harness,
             "entry": entry,
-            "topic": "auto-save",
+            "topic": CHECKPOINT_TOPIC,
         })
         _log(f"Silent save {'OK' if ok else 'FAILED (daemon unreachable)'} at exchange {exchange_count}")
         if toast:
-            _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs")
+            _desktop_notify("MemPalace", f"Auto-saved at {exchange_count} msgs ({trigger})")
         _output({})
     else:
         if toast:

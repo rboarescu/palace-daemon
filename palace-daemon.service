@@ -4,16 +4,18 @@ After=network.target
 
 [Service]
 Type=simple
-User=user
-WorkingDirectory=/home/user/palace-daemon
-ExecStartPre=-/usr/bin/fuser -k 8085/tcp
-ExecStartPre=-/usr/bin/rm -f /home/user/.cache/palace-daemon/daemon-8085.lock
-ExecStart=/home/user/.local/share/pipx/venvs/mempalace/bin/python main.py
+User=radu
+Group=radu
+WorkingDirectory=/home/radu/palace-daemon
+# Use the new --force flag to ensure port 8085 is cleared on every start
+ExecStart=/home/radu/.local/share/pipx/venvs/mempalace/bin/python main.py --force --palace /home/radu/.mempalace/palace
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONUNBUFFERED=1
+Environment=PALACE_MAX_READ_CONCURRENCY=4
+Environment=PALACE_MAX_WRITE_CONCURRENCY=1
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+services:
+  palace-daemon:
+    build: .
+    ports:
+      - "${PALACE_PORT:-8085}:8085"
+    volumes:
+      # Mount your palace directory here. The daemon owns the palace;
+      # do not run a second daemon or mempalace CLI against the same path
+      # while this container is running.
+      - ${PALACE_PATH:-~/.mempalace/palace}:/palace:rw
+    environment:
+      - PALACE_API_KEY=${PALACE_API_KEY:-}
+      - PALACE_MAX_CONCURRENCY=${PALACE_MAX_CONCURRENCY:-4}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
