@@ -257,14 +257,10 @@ async def lifespan(app: FastAPI):
     import logging
     logger = logging.getLogger(__name__)
     
-    # Register signal handlers for graceful shutdown
-    def handle_exit(sig, frame):
-        logger.warning("Received signal %s, shutting down...", sig)
-        # _mp handles its own state, but we ensure the daemon stops accepting new tasks
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, handle_exit)
-    signal.signal(signal.SIGTERM, handle_exit)
+    # Uvicorn installs its own SIGINT/SIGTERM handlers that shut down gracefully;
+    # we don't need to override them. Calling sys.exit() from inside an asyncio
+    # signal handler tears the event loop down mid-coroutine and skips lifespan
+    # shutdown (the flush). Leave signal handling to uvicorn.
 
     moved = quarantine_stale_hnsw(_mp._config.palace_path)
     if moved:
@@ -272,7 +268,19 @@ async def lifespan(app: FastAPI):
             "Quarantined %d stale HNSW segment(s) — ChromaDB will rebuild indexes: %s",
             len(moved), moved,
         )
-    
+
+    # Warm the ChromaDB client before accepting traffic. The Rust HNSW binding
+    # occasionally segfaults on the very first request if opened cold; opening
+    # it here (before yield) ensures the PersistentClient is fully initialized.
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _mp.handle_request, {
+            "jsonrpc": "2.0", "id": "warmup", "method": "ping", "params": {}
+        })
+        logger.info("Palace client warmed up.")
+    except Exception as e:
+        logger.warning("Warmup ping failed (non-fatal): %s", e)
+
     yield
     
     # --- Shutdown: Silent Save / Flush ---
