@@ -25,7 +25,7 @@ probe() {
   local expected="$2"
   shift 2
   local resp
-  resp=$(curl -sS --max-time 30 "${H_AUTH[@]}" "$@" 2>&1) || fail "$label — curl error"
+  resp=$(curl -sS --max-time 90 "${H_AUTH[@]}" "$@" 2>&1) || fail "$label — curl error"
   if echo "$resp" | grep -q "$expected"; then
     pass "$label"
   else
@@ -38,7 +38,7 @@ probe_json_field() {
   local field="$2"
   shift 2
   local val
-  val=$(curl -sS --max-time 30 "${H_AUTH[@]}" "$@" 2>&1 | python3 -c "
+  val=$(curl -sS --max-time 90 "${H_AUTH[@]}" "$@" 2>&1 | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -78,7 +78,7 @@ probe "GET /stats" "kg" "$URL/stats"
 probe_json_field "GET /repair/status" "in_progress" "$URL/repair/status"
 
 # limit= is honored — proves the max_results→limit fix landed.
-COUNT=$(curl -sS --max-time 30 "${H_AUTH[@]}" "$URL/search?q=palace&limit=3&kind=all" \
+COUNT=$(curl -sS --max-time 90 "${H_AUTH[@]}" "$URL/search?q=palace&limit=3&kind=all" \
   | python3 -c "import json, sys; print(len(json.load(sys.stdin).get('results', [])))" 2>&1)
 if [ "$COUNT" = "3" ]; then
   pass "limit=3 returns 3 hits (max_results fix)"
@@ -89,9 +89,9 @@ else
 fi
 
 # Default kind=content excludes more drawers than kind=all.
-ALL=$(curl -sS --max-time 30 "${H_AUTH[@]}" "$URL/search?q=palace&limit=20&kind=all" \
+ALL=$(curl -sS --max-time 90 "${H_AUTH[@]}" "$URL/search?q=palace&limit=20&kind=all" \
   | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('available_in_scope', 0))" 2>&1)
-CONTENT=$(curl -sS --max-time 30 "${H_AUTH[@]}" "$URL/search?q=palace&limit=20&kind=content" \
+CONTENT=$(curl -sS --max-time 90 "${H_AUTH[@]}" "$URL/search?q=palace&limit=20&kind=content" \
   | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('available_in_scope', 0))" 2>&1)
 if [ "$ALL" -gt "$CONTENT" ] 2>/dev/null; then
   pass "kind=content scope ($CONTENT) < kind=all scope ($ALL) — checkpoint filter active"

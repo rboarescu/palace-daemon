@@ -113,7 +113,7 @@ The `-` prefix means failures are ignored (i.e. if nothing is blocking, these ar
 | POST | /repair | Coordinate repair with daemon traffic (`mode`: `light`/`scan`/`prune`/`rebuild`) |
 | GET | /repair/status | Current repair state + pending-writes queue depth |
 | POST | /silent-save | Stop-hook silent save; queues during `/repair mode=rebuild` |
-| GET | /stats | Wing/room counts, KG stats |
+| GET | /stats | Wing/room counts, KG stats. **Heavy call** — fan-outs to three MCP tools and walks the full corpus; expect 30-90s on a 100K+ drawer palace. Designed for admin / debugging, not chat-turn paths. |
 | GET | /search?q=...&limit=5&kind=content | Semantic search. `kind` ∈ {content, checkpoint, all} — see below. |
 | GET | /context?topic=...&kind=content | Same as search, named for LLM use |
 | POST | /memory | Store a drawer {content, wing, room} |
