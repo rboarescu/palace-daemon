@@ -1,0 +1,147 @@
+#!/bin/bash
+# palace-mode — manage local/remote palace switching and customizations.
+#
+# Subcommands:
+#   palace-mode                 # show current mode + customization status
+#   palace-mode local           # switch hooks/MCP to in-process palace
+#   palace-mode remote [URL]    # switch hooks/MCP to daemon (default URL)
+#   palace-mode install         # re-apply all customizations (run after plugin updates)
+#   palace-mode verify          # check that all customizations are in place
+
+set -euo pipefail
+
+SETTINGS="$HOME/.claude/settings.local.json"
+DEFAULT_URL="http://disks.jphe.in:8085"
+DEFAULT_KEY="adb43b99effac3aced2c82de54827850c6da1fbf4a5e473e1938529b27c08ab3"
+
+# Resolve clients dir relative to this script (works as symlink too).
+CLIENTS_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" &> /dev/null && pwd)"
+DISPATCH="$CLIENTS_DIR/palace-mcp-dispatch.sh"
+FAST="$CLIENTS_DIR/mempal-fast.py"
+
+# Auto-discover the latest installed mempalace plugin in the cache.
+PLUGIN_CACHE_DIR="$(ls -1d "$HOME"/.claude/plugins/cache/mempalace/mempalace/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')"
+WORKSPACE_DIR="$HOME/Projects/memorypalace/.claude-plugin"
+
+# ------------------------------------------------------------------ helpers
+
+show_status() {
+    python3 - <<PY
+import json
+d = json.load(open("$SETTINGS"))
+url = d.get("env", {}).get("PALACE_DAEMON_URL", "")
+print("Mode: " + ("remote (" + url + ")" if url else "local (no daemon)"))
+PY
+}
+
+set_mode_remote() {
+    url="${1:-$DEFAULT_URL}"
+    python3 - <<PY
+import json
+p = "$SETTINGS"
+d = json.load(open(p))
+env = d.setdefault("env", {})
+env["PALACE_DAEMON_URL"] = "$url"
+env["PALACE_API_KEY"] = "$DEFAULT_KEY"
+json.dump(d, open(p, "w"), indent=4)
+PY
+    echo "→ remote mode (PALACE_DAEMON_URL=$url)"
+}
+
+set_mode_local() {
+    python3 - <<PY
+import json
+p = "$SETTINGS"
+d = json.load(open(p))
+env = d.setdefault("env", {})
+env.pop("PALACE_DAEMON_URL", None)
+env.pop("PALACE_API_KEY", None)
+json.dump(d, open(p, "w"), indent=4)
+PY
+    echo "→ local mode"
+}
+
+# ------------------------------------------------------------------ install
+
+install_wrappers() {
+    local hooks_dir="$1"
+    [ -d "$hooks_dir" ] || return 0
+    cat > "$hooks_dir/mempal-stop-hook.sh" <<EOF
+#!/bin/bash
+exec python3 $FAST stop
+EOF
+    cat > "$hooks_dir/mempal-precompact-hook.sh" <<EOF
+#!/bin/bash
+exec python3 $FAST precompact
+EOF
+    chmod +x "$hooks_dir"/mempal-{stop,precompact}-hook.sh
+}
+
+install_cache_plugin_json() {
+    [ -f "$PLUGIN_CACHE_DIR/plugin.json" ] || return 0
+    python3 - <<PY
+import json, sys
+p = "$PLUGIN_CACHE_DIR/plugin.json"
+d = json.load(open(p))
+d["mcpServers"] = {"mempalace": {"command": "$DISPATCH"}}
+json.dump(d, open(p, "w"), indent=2)
+PY
+}
+
+install_cache_hooks_json() {
+    [ -d "$PLUGIN_CACHE_DIR/hooks" ] || return 0
+    cat > "$PLUGIN_CACHE_DIR/hooks/hooks.json" <<EOF
+{
+  "description": "MemPalace auto-save and pre-compact hooks",
+  "hooks": {
+    "Stop": [{"hooks": [{"type": "command", "command": "bash \${CLAUDE_PLUGIN_ROOT}/hooks/mempal-stop-hook.sh"}]}],
+    "PreCompact": [{"hooks": [{"type": "command", "command": "bash \${CLAUDE_PLUGIN_ROOT}/hooks/mempal-precompact-hook.sh"}]}]
+  }
+}
+EOF
+}
+
+do_install() {
+    [ -x "$DISPATCH" ] || { echo "missing dispatcher: $DISPATCH" >&2; exit 1; }
+    [ -x "$FAST"     ] || { echo "missing fast-path:  $FAST"     >&2; exit 1; }
+    install_cache_plugin_json
+    install_cache_hooks_json
+    install_wrappers "$PLUGIN_CACHE_DIR/hooks"
+    install_wrappers "$WORKSPACE_DIR/hooks"
+    echo "→ installed customizations into cache + workspace"
+}
+
+# ------------------------------------------------------------------ verify
+
+verify() {
+    local fail=0
+    check() { if [ -e "$1" ]; then echo "  ok    $1"; else echo "  MISS  $1"; fail=1; fi; }
+    check_x() { if [ -x "$1" ]; then echo "  ok    $1"; else echo "  N/X   $1"; fail=1; fi; }
+    check_grep() { if grep -q -- "$2" "$1" 2>/dev/null; then echo "  ok    $1 contains $2"; else echo "  BAD   $1 missing $2"; fail=1; fi; }
+
+    echo "shared scripts:"
+    check_x "$DISPATCH"
+    check_x "$FAST"
+
+    echo "cache plugin:"
+    check_grep "$PLUGIN_CACHE_DIR/plugin.json" "palace-mcp-dispatch.sh"
+    check_grep "$PLUGIN_CACHE_DIR/hooks/mempal-stop-hook.sh" "mempal-fast.py"
+    check_grep "$PLUGIN_CACHE_DIR/hooks/mempal-precompact-hook.sh" "mempal-fast.py"
+
+    echo "workspace:"
+    check_grep "$WORKSPACE_DIR/hooks/mempal-stop-hook.sh" "mempal-fast.py"
+    check_grep "$WORKSPACE_DIR/hooks/mempal-precompact-hook.sh" "mempal-fast.py"
+
+    [ $fail -eq 0 ] && echo "ALL OK" || { echo "FAILED — run: palace-mode install" >&2; exit 1; }
+}
+
+# ------------------------------------------------------------------ dispatch
+
+case "${1:-status}" in
+    status|"")  show_status ;;
+    local)      set_mode_local ;;
+    remote)     set_mode_remote "${2:-}" ;;
+    install)    do_install; verify ;;
+    verify)     verify ;;
+    *)          echo "usage: palace-mode [status|local|remote [URL]|install|verify]" >&2; exit 1 ;;
+esac
