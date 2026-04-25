@@ -546,13 +546,24 @@ async def graph(x_api_key: str | None = Header(default=None)):
         }
 
     # Phase 1: parallel-gather the once-per-palace tools.
-    wings_resp, tunnels_resp, kg_stats_resp = await asyncio.gather(
+    # Note: tunnels come from `mempalace_graph_stats.top_tunnels` rather
+    # than `mempalace_list_tunnels`. As of mempalace 3.3.4 the two
+    # disagree on what counts as a tunnel — graph_stats reports 9 on the
+    # canonical palace, list_tunnels returns []. Until that's reconciled
+    # upstream, prefer graph_stats which `/stats` already exposes, so
+    # `/graph.tunnels` and `/stats.graph.tunnel_rooms` always agree.
+    wings_resp, graph_stats_resp, kg_stats_resp = await asyncio.gather(
         _call(_mcp("mempalace_list_wings", {}, 1)),
-        _call(_mcp("mempalace_list_tunnels", {}, 2)),
+        _call(_mcp("mempalace_graph_stats", {}, 2)),
         _call(_mcp("mempalace_kg_stats", {}, 3)),
     )
     wings_payload = _unwrap(wings_resp) or {}
     wings = wings_payload.get("wings") or {}
+    graph_payload = _unwrap(graph_stats_resp) or {}
+    tunnels = [
+        {"room": t.get("room"), "wings": t.get("wings", [])}
+        for t in (graph_payload.get("top_tunnels") or [])
+    ]
 
     # Phase 2: parallel list_rooms per wing.
     if wings:
@@ -573,7 +584,7 @@ async def graph(x_api_key: str | None = Header(default=None)):
     return {
         "wings": wings,
         "rooms": rooms,
-        "tunnels": _unwrap(tunnels_resp) or [],
+        "tunnels": tunnels,
         "kg_entities": kg_entities,
         "kg_triples": kg_triples,
         "kg_stats": _unwrap(kg_stats_resp) or {},
