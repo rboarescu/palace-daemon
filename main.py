@@ -39,12 +39,26 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
 API_KEY = os.getenv("PALACE_API_KEY", "")  # read at startup for argparse default; auth checks re-read from env dynamically
 PALACE_MAX_CONCURRENCY = int(os.getenv("PALACE_MAX_CONCURRENCY", "4"))
+
+# Canonical topic for Stop-hook auto-save checkpoint diary entries.
+# Defined here so /silent-save can canonicalize at the daemon boundary
+# even when client code drifts. Must match clients/hook.py and
+# clients/mempal-fast.py and the read-side filter list in
+# mempalace.searcher._CHECKPOINT_TOPICS.
+CHECKPOINT_TOPIC = "checkpoint"
+# Legacy synonyms that older clients (or future buggy ones) might write.
+# When /silent-save sees one of these, it rewrites to CHECKPOINT_TOPIC
+# and emits a warning log line. The read-side filter accepts both.
+CHECKPOINT_TOPIC_SYNONYMS = ("auto-save",)
+# Valid kind= values for /search and /context. Mirrors the enum on the
+# mempalace_search MCP tool's input_schema. Anything else => 400.
+_VALID_KINDS = ("content", "checkpoint", "all")
 
 # Read ops: up to N concurrent.
 # Regular write ops: up to N//2 concurrent (mempalace ≥3.3.2 is internally safe).
@@ -216,6 +230,28 @@ async def _drain_pending_writes() -> int:
     return count
 
 
+def _canonical_topic(topic: str) -> str:
+    """Canonicalize a Stop-hook checkpoint topic at the daemon boundary.
+
+    All canonical and synonym values become ``CHECKPOINT_TOPIC``. Any
+    other value is left as-is — the caller may have legitimately used
+    a non-checkpoint topic name on this diary write (e.g. "musings",
+    "decisions") and we shouldn't clobber that.
+
+    Defense in depth: clients (clients/hook.py, clients/mempal-fast.py,
+    mempalace.hooks_cli) already write the canonical value; this
+    rewrite catches future drift or buggy callers without rejecting the
+    save outright.
+    """
+    if topic in CHECKPOINT_TOPIC_SYNONYMS:
+        _log.warning(
+            "silent-save: rewriting non-canonical checkpoint topic %r → %r",
+            topic, CHECKPOINT_TOPIC,
+        )
+        return CHECKPOINT_TOPIC
+    return topic
+
+
 async def _do_silent_save_write(payload: dict) -> dict:
     """Write a diary checkpoint via tool_diary_write in an executor.
 
@@ -224,7 +260,7 @@ async def _do_silent_save_write(payload: dict) -> dict:
     """
     wing = payload.get("wing", "") or ""
     entry = payload.get("entry", "")
-    topic = payload.get("topic", "checkpoint")
+    topic = _canonical_topic(payload.get("topic", CHECKPOINT_TOPIC))
     agent_name = payload.get("agent_name", "session-hook")
     loop = asyncio.get_running_loop()
 
@@ -339,25 +375,58 @@ async def health():
     return {"status": "ok", "daemon": "palace-daemon", "version": VERSION, "palace": result}
 
 
+def _search_args(query: str, limit: int, kind: str) -> dict:
+    """Build the mempalace_search MCP tool arguments dict.
+
+    Param-name fidelity matters: the MCP tool's input_schema declares
+    ``limit`` and ``kind``, and unknown keys are silently dropped by the
+    schema-whitelist filter in ``mempalace.mcp_server.handle_request``.
+    Earlier daemon versions passed ``max_results`` here, which never
+    bound and quietly capped every /search response at the default 5.
+    """
+    if kind not in _VALID_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of {_VALID_KINDS}; got {kind!r}",
+        )
+    return {"query": query, "limit": limit, "kind": kind}
+
+
 @app.get("/search")
-async def search(q: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
+async def search(
+    q: str,
+    limit: int = 5,
+    kind: str = "content",
+    x_api_key: str | None = Header(default=None),
+):
+    """Semantic search. ``kind`` defaults to ``"content"`` which excludes
+    Stop-hook auto-save checkpoints (session-summary noise that drowns
+    out real content under vector similarity). Pass ``kind="all"`` to
+    preserve pre-2026-04-25 behavior, or ``kind="checkpoint"`` for
+    recovery/audit lookups."""
     _check_auth(x_api_key)
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": q, "max_results": limit}},
+        "params": {"name": "mempalace_search", "arguments": _search_args(q, limit, kind)},
     })
     return _unwrap(result)
 
 
 @app.get("/context")
-async def context(topic: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
-    # Alias for /search with a semantically friendlier name for LLM tool prompts
+async def context(
+    topic: str,
+    limit: int = 5,
+    kind: str = "content",
+    x_api_key: str | None = Header(default=None),
+):
+    """Alias for /search with a semantically friendlier name for LLM tool
+    prompts. Same ``kind`` semantics as /search."""
     _check_auth(x_api_key)
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": topic, "max_results": limit}},
+        "params": {"name": "mempalace_search", "arguments": _search_args(topic, limit, kind)},
     })
     return _unwrap(result)
 
