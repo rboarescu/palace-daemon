@@ -132,33 +132,6 @@ def _sem_for(request_dict: dict) -> asyncio.Semaphore:
     return _read_sem if tool_name in _READ_TOOLS else _write_sem
 
 
-async def _warn_if_hnsw_threads_unset() -> None:
-    """Warn if hnsw:num_threads != 1 after a collection reopen.
-
-    ChromaDB 1.5.x does not persist HNSW metadata across reopens (MemPalace
-    issue #1161). After any cache clear the collection silently reverts to
-    parallel inserts, risking SIGSEGV under concurrent writes.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _mp.handle_request, {
-            "jsonrpc": "2.0", "id": "hnsw-check", "method": "ping", "params": {}
-        })
-        col = _mp._collection_cache
-        meta = (col and getattr(col, "_collection", None) and
-                getattr(col._collection, "metadata", None)) or {}
-        threads = meta.get("hnsw:num_threads")
-        if threads != 1:
-            _log.warning(
-                "HNSW num_threads=%s after collection reopen — parallel inserts active. "
-                "Concurrent writes risk SIGSEGV. See MemPalace issue #1161. "
-                "Upgrade to mempalace >=3.3.4 when available.",
-                threads,
-            )
-    except Exception:
-        pass
-
-
 async def _auto_repair():
     """Trigger index recovery and reload the mempalace client."""
     loop = asyncio.get_running_loop()
