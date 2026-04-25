@@ -74,6 +74,9 @@ probe "GET /context?kind=all" "results" "$URL/context?topic=palace-daemon&limit=
 # /stats — read-only summary across kg + graph + status tools.
 probe "GET /stats" "kg" "$URL/stats"
 
+# /graph — single-shot structural snapshot (v1.6.0).
+probe "GET /graph" '"wings"' "$URL/graph"
+
 # /repair/status — query state, no actual repair.
 probe_json_field "GET /repair/status" "in_progress" "$URL/repair/status"
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.0] - 2026-04-25
+
+### Added
+- **`GET /graph`** — single-shot structural snapshot for SME-style consumers. Mirrors `/stats`'s `asyncio.gather` shape but adds a parallel `mempalace_list_rooms` fan-out per wing and a direct read-only sqlite read of `knowledge_graph.sqlite3`. Replaces what an adapter would otherwise compose serially over HTTP — on the 151K-drawer canonical palace `list_wings` alone takes ~30s, so a serial composition costs minutes.
+- Response shape: `{ "wings": {...}, "rooms": [{"wing", "rooms"}], "tunnels": [...], "kg_entities": [...], "kg_triples": [...], "kg_stats": {...} }`.
+- KG read uses URI-mode `?mode=ro` so the daemon can never accidentally write that file. Schema differences across mempalace versions tolerated via per-query `OperationalError` catch.
+- Added `GET /graph` probe to `scripts/verify-routes.sh`.
+
+### Notes
+- Spec: `docs/graph-endpoint.md`. Coordinates with `multipass-structural-memory-eval` (SME) — adapter prefers `/graph` once daemon ≥ 1.6.0 and falls back to MCP composition otherwise.
+- `_kg_path()` derives KG location from `_mp._config.palace_path` (sibling to `chroma.sqlite3`), so non-default deployments (`PALACE_PATH=/mnt/raid/...`) work unchanged.
+
 ## [1.5.1] - 2026-04-25
 
 ### Added

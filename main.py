@@ -39,7 +39,7 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -459,6 +459,125 @@ async def stats(x_api_key: str | None = Header(default=None)):
     ])
     kg, graph, status = [_unwrap(r) for r in responses]
     return {"kg": kg, "graph": graph, "status": status}
+
+
+def _kg_path() -> str:
+    """KG sqlite path. Lives next to chroma.sqlite3 inside the palace dir."""
+    return os.path.join(_mp._config.palace_path, "knowledge_graph.sqlite3")
+
+
+def _read_kg_direct() -> tuple[list[dict], list[dict]]:
+    """Read-only snapshot of KG entities + triples.
+
+    The KG is a separate SQLite file from the ChromaDB store the daemon
+    coordinates writes for, so a read here does not cross the
+    single-writer invariant. Opens read-only via URI mode so it cannot
+    create the file or mutate state. Schema differences (older palaces,
+    in-progress migrations) are tolerated by catching OperationalError
+    on each query.
+    """
+    kg_path = _kg_path()
+    if not os.path.isfile(kg_path):
+        return [], []
+    try:
+        conn = sqlite3.connect(f"file:{kg_path}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.OperationalError:
+        return [], []
+
+    entities: list[dict] = []
+    triples: list[dict] = []
+    try:
+        try:
+            for r in conn.execute("SELECT id, name, type, properties FROM entities"):
+                try:
+                    props = json.loads(r["properties"] or "{}")
+                except (TypeError, ValueError):
+                    props = {}
+                entities.append({
+                    "id": r["id"],
+                    "name": r["name"],
+                    "type": r["type"] or "unknown",
+                    "properties": props,
+                })
+        except sqlite3.OperationalError:
+            pass
+        try:
+            for r in conn.execute(
+                "SELECT subject, predicate, object, valid_from, valid_to, "
+                "confidence, source_file FROM triples"
+            ):
+                triples.append({
+                    "subject": r["subject"],
+                    "predicate": r["predicate"],
+                    "object": r["object"],
+                    "valid_from": r["valid_from"],
+                    "valid_to": r["valid_to"],
+                    "confidence": r["confidence"],
+                    "source_file": r["source_file"],
+                })
+        except sqlite3.OperationalError:
+            pass
+    finally:
+        conn.close()
+    return entities, triples
+
+
+@app.get("/graph")
+async def graph(x_api_key: str | None = Header(default=None)):
+    """Single-shot structural snapshot for SME-style consumers.
+
+    Mirrors `/stats`'s asyncio.gather pattern but adds:
+    - rooms-per-wing fan-out (parallel)
+    - direct sqlite read of the KG (no extra MCP roundtrip)
+
+    Replaces what an SME adapter would otherwise compose by serially
+    calling list_wings + list_rooms × N + list_tunnels + kg_stats over
+    HTTP. On the 151K-drawer canonical palace, list_wings alone takes
+    ~30s; the gather here finishes in well under that.
+    """
+    _check_auth(x_api_key)
+
+    def _mcp(tool: str, args: dict, rid: int) -> dict:
+        return {
+            "jsonrpc": "2.0", "id": rid,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": args},
+        }
+
+    # Phase 1: parallel-gather the once-per-palace tools.
+    wings_resp, tunnels_resp, kg_stats_resp = await asyncio.gather(
+        _call(_mcp("mempalace_list_wings", {}, 1)),
+        _call(_mcp("mempalace_list_tunnels", {}, 2)),
+        _call(_mcp("mempalace_kg_stats", {}, 3)),
+    )
+    wings_payload = _unwrap(wings_resp) or {}
+    wings = wings_payload.get("wings") or {}
+
+    # Phase 2: parallel list_rooms per wing.
+    if wings:
+        room_responses = await asyncio.gather(*[
+            _call(_mcp("mempalace_list_rooms", {"wing": w}, 100 + i))
+            for i, w in enumerate(wings)
+        ])
+        rooms = [
+            {"wing": w, "rooms": (_unwrap(r) or {}).get("rooms", {})}
+            for w, r in zip(wings, room_responses)
+        ]
+    else:
+        rooms = []
+
+    # Phase 3: KG entities + triples via direct read-only sqlite.
+    kg_entities, kg_triples = await asyncio.to_thread(_read_kg_direct)
+
+    return {
+        "wings": wings,
+        "rooms": rooms,
+        "tunnels": _unwrap(tunnels_resp) or [],
+        "kg_entities": kg_entities,
+        "kg_triples": kg_triples,
+        "kg_stats": _unwrap(kg_stats_resp) or {},
+    }
 
 
 @app.post("/flush")
