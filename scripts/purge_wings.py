@@ -18,8 +18,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-PALACE_PATH = Path.home() / ".mempalace" / "palace"
-DB_PATH = PALACE_PATH / "chroma.sqlite3"
+_DEFAULT_PALACE = Path.home() / ".mempalace" / "palace"
 
 
 def get_embedding_ids(db: sqlite3.Connection, wing: str) -> list[int]:
@@ -92,7 +91,12 @@ def main():
     parser = argparse.ArgumentParser(description="Offline wing purge (daemon must be stopped)")
     parser.add_argument("wings", nargs="+", help="Wing names to purge")
     parser.add_argument("--dry-run", action="store_true", help="Count only, no deletion")
+    parser.add_argument("--palace", type=Path, default=_DEFAULT_PALACE, help="Path to palace directory")
     args = parser.parse_args()
+
+    global PALACE_PATH, DB_PATH
+    PALACE_PATH = args.palace
+    DB_PATH = PALACE_PATH / "chroma.sqlite3"
 
     if not DB_PATH.exists():
         print(f"Database not found at {DB_PATH}", file=sys.stderr)
