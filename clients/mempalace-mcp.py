@@ -52,7 +52,11 @@ def forward(url: str, request: dict) -> dict:
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    # 120s headroom for slow read tools (e.g. mempalace_status walking a
+    # multi-GB palace) plus short waits behind in-flight writes on the
+    # daemon's read semaphore. Override with PALACE_MCP_TIMEOUT for tuning.
+    timeout = int(os.getenv("PALACE_MCP_TIMEOUT", "120"))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
