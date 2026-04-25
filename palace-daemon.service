@@ -3,7 +3,8 @@ Description=palace-daemon — MemPalace HTTP/MCP gateway
 After=network.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=radu
 Group=radu
 WorkingDirectory=/home/radu/palace-daemon
@@ -11,6 +12,7 @@ WorkingDirectory=/home/radu/palace-daemon
 ExecStart=/home/radu/.local/share/pipx/venvs/mempalace/bin/python main.py --force --palace /home/radu/.mempalace/palace
 Restart=on-failure
 RestartSec=5
+WatchdogSec=120
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONUNBUFFERED=1

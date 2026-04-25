@@ -39,7 +39,7 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -65,6 +65,47 @@ _repair_state: dict[str, Any] = {"in_progress": False, "mode": None, "started_at
 _repair_lock = asyncio.Lock()
 
 _log = logging.getLogger("palace-daemon")
+
+
+# ── Systemd watchdog / sd_notify ─────────────────────────────────────────────
+
+def _sd_notify(msg: str) -> None:
+    """Send a message to systemd notify socket without external dependencies."""
+    sock_path = os.environ.get("NOTIFY_SOCKET", "")
+    if not sock_path:
+        return
+    try:
+        import socket as _sock
+        with _sock.socket(_sock.AF_UNIX, _sock.SOCK_DGRAM) as s:
+            # Abstract namespace sockets use NUL prefix; systemd uses @ prefix.
+            addr = chr(0) + sock_path[1:] if sock_path.startswith("@") else sock_path
+            s.sendto(msg.encode(), addr)
+    except Exception:
+        pass
+
+
+def _watchdog_interval() -> int:
+    """Return WatchdogSec in seconds from WATCHDOG_USEC (set by systemd), or 0."""
+    try:
+        return int(os.environ.get("WATCHDOG_USEC", "0")) // 1_000_000
+    except ValueError:
+        return 0
+
+
+async def _watchdog_loop(interval_secs: int) -> None:
+    """Ping systemd watchdog at half the watchdog interval, only when palace is healthy."""
+    tick = max(10, interval_secs // 2)
+    while True:
+        await asyncio.sleep(tick)
+        try:
+            loop = asyncio.get_running_loop()
+            col = await loop.run_in_executor(None, _mp._get_collection)
+            if col is not None:
+                _sd_notify("WATCHDOG=1\n")
+            else:
+                _log.warning("Watchdog: palace collection unavailable — skipping WATCHDOG=1")
+        except Exception as e:
+            _log.warning("Watchdog check failed: %s", e)
 
 
 async def _warn_if_hnsw_threads_unset() -> None:
@@ -321,16 +362,24 @@ async def lifespan(app: FastAPI):
     # Warm the ChromaDB client before accepting traffic. The Rust HNSW binding
     # occasionally segfaults on the very first request if opened cold; opening
     # it here (before yield) ensures the PersistentClient is fully initialized.
+    # We open the collection directly (not via ping) so that _get_collection's
+    # hnsw:num_threads=1 fix is applied before _warn_if_hnsw_threads_unset runs.
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _mp.handle_request, {
-            "jsonrpc": "2.0", "id": "warmup", "method": "ping", "params": {}
-        })
+        await loop.run_in_executor(None, _mp._get_collection, True)
         logger.info("Palace client warmed up.")
     except Exception as e:
-        logger.warning("Warmup ping failed (non-fatal): %s", e)
+        logger.warning("Warmup collection open failed (non-fatal): %s", e)
     await _warn_if_hnsw_threads_unset()
 
+    # Signal systemd that startup is complete (Type=notify in service file).
+    _sd_notify("READY=1\n")
+
+    # Start systemd watchdog loop if WatchdogSec is configured.
+    wdog_secs = _watchdog_interval()
+    if wdog_secs > 0:
+        asyncio.create_task(_watchdog_loop(wdog_secs))
+        logger.info("Systemd watchdog active (interval=%ds, tick=%ds).", wdog_secs, max(10, wdog_secs // 2))
 
     yield
     
@@ -371,7 +420,18 @@ async def health():
     # Bypass semaphores — health must respond even when all slots are busy.
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, _mp.handle_request, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}) or {}
-    return {"status": "ok", "daemon": "palace-daemon", "version": VERSION, "palace": result}
+    # Test actual collection access so /health reflects true palace state.
+    palace_ok = False
+    try:
+        col = await loop.run_in_executor(None, _mp._get_collection)
+        palace_ok = col is not None
+    except Exception:
+        pass
+    status = "ok" if palace_ok else "degraded"
+    payload = {"status": status, "daemon": "palace-daemon", "version": VERSION, "palace": result}
+    if not palace_ok:
+        return JSONResponse(content=payload, status_code=503)
+    return payload
 
 
 @app.get("/search")

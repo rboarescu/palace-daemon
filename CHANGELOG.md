@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.1] - 2026-04-26
+
+### Fixed
+- **`_get_collection` silent failures** -- exceptions are now logged (palace path + error) instead of silently returning `None`. Cache-staleness incidents are now visible in the daemon log.
+- **Stale collection cache self-healing** -- `_get_collection` retries once after clearing all caches (`_client_cache`, `_collection_cache`, `_metadata_cache`) on failure. The incident that required a manual daemon restart now self-heals on the next tool call.
+- **HNSW `num_threads=1` enforced on every open** -- `_get_collection` calls `collection.modify()` after every open, merging `hnsw:num_threads=1` into existing metadata. ChromaDB 1.5.x does not persist HNSW metadata across reopens (issue #1161); without this, every cache clear silently re-enabled parallel inserts and risked SIGSEGV under concurrent writes.
+- **`/health` reflects actual palace state** -- previously returned HTTP 200 `ok` even when the collection was broken (false healthy). Now calls `_get_collection()` and returns HTTP 503 `degraded` if the palace is unavailable.
+
+### Added
+- **Systemd watchdog** -- daemon sends `READY=1` on startup and `WATCHDOG=1` every `WatchdogSec/2` seconds via `sd_notify` (stdlib-only, no external deps). Watchdog pings are gated on a live `_get_collection()` check: if the palace goes dark, the watchdog goes silent and systemd kills and restarts the daemon.
+- `palace-daemon.service` updated: `Type=simple` changed to `Type=notify`, `NotifyAccess=main` added, `WatchdogSec=120` added. Re-install: `sudo cp palace-daemon.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart palace-daemon`.
+- **Startup warmup opens the collection** -- lifespan warmup now calls `_get_collection(create=True)` directly instead of `ping`. `ping` never touches the collection, so `num_threads=1` was not applied before `_warn_if_hnsw_threads_unset` ran at startup, causing a spurious warning on every boot. The warning is now silent on a healthy palace.
+
 ## [1.5.0] - 2026-04-24
 
 ### Added

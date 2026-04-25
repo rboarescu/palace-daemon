@@ -1,0 +1,76 @@
+--- a/mempalace/mcp_server.py
++++ b/mempalace/mcp_server.py
+@@ -212,25 +212,56 @@
+ 
+ 
+ def _get_collection(create=False):
+-    """Return the ChromaDB collection, caching the client between calls."""
+-    global _collection_cache, _metadata_cache, _metadata_cache_time
+-    try:
+-        client = _get_client()
+-        if create:
+-            _collection_cache = ChromaCollection(
+-                client.get_or_create_collection(
+-                    _config.collection_name, metadata={"hnsw:space": "cosine"}
++    """Return the ChromaDB collection, caching the client between calls.
++
++    Retries once on failure after clearing all caches (fixes stale-cache
++    breakage without requiring a daemon restart). Logs the exception so
++    failures are visible in the daemon log instead of silently returning None.
++    Sets hnsw:num_threads=1 on every open — ChromaDB 1.5.x does not persist
++    HNSW metadata across reopens, so parallel inserts stay disabled.
++    """
++    global _client_cache, _collection_cache, _metadata_cache, _metadata_cache_time
++    for attempt in range(2):
++        try:
++            client = _get_client()
++            if create:
++                _collection_cache = ChromaCollection(
++                    client.get_or_create_collection(
++                        _config.collection_name,
++                        metadata={"hnsw:space": "cosine", "hnsw:num_threads": 1},
++                    )
++                )
++                _metadata_cache = None
++                _metadata_cache_time = 0
++            elif _collection_cache is None:
++                _collection_cache = ChromaCollection(
++                    client.get_collection(_config.collection_name)
+                 )
++                _metadata_cache = None
++                _metadata_cache_time = 0
++            # Re-apply num_threads=1 on every open since ChromaDB 1.5.x does
++            # not persist HNSW metadata across PersistentClient reopens (#1161).
++            if _collection_cache is not None:
++                try:
++                    existing = getattr(_collection_cache._collection, "metadata", {}) or {}
++                    if existing.get("hnsw:num_threads") != 1:
++                        _collection_cache._collection.modify(
++                            metadata={**existing, "hnsw:num_threads": 1}
++                        )
++                except Exception:
++                    pass
++            return _collection_cache
++        except Exception as e:
++            logger.error(
++                "_get_collection attempt %d failed (palace=%s): %s",
++                attempt + 1, _config.palace_path, e,
+             )
+-            _metadata_cache = None
+-            _metadata_cache_time = 0
+-        elif _collection_cache is None:
+-            _collection_cache = ChromaCollection(client.get_collection(_config.collection_name))
+-            _metadata_cache = None
+-            _metadata_cache_time = 0
+-        return _collection_cache
+-    except Exception:
+-        return None
++            if attempt == 0:
++                _client_cache = None
++                _collection_cache = None
++                _metadata_cache = None
++                _metadata_cache_time = 0
++    return None
+ 
+ 
+ def _no_palace():

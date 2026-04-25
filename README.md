@@ -21,6 +21,9 @@ To prevent database corruption, this project enforces a strict **Single-Process 
 ## Features
 
 - **Self-Healing Startup** — `--force` flag automatically clears stale processes on the target port
+- **Collection cache auto-retry** -- if the internal ChromaDB collection cache goes stale, `_get_collection` clears all caches and retries once automatically before returning an error
+- **HNSW thread safety** -- `num_threads=1` is enforced on every collection open, not just creation; prevents SIGSEGV from parallel inserts after any cache clear (ChromaDB 1.5.x issue #1161)
+- **Systemd watchdog** -- sends `READY=1` on startup and `WATCHDOG=1` every 60s (gated on a live collection check); systemd restarts the daemon if the palace goes dark
 - **Protected Manual Start** — requires `--manual` flag for debugging, preventing accidental agent starts
 - **MCP proxy** — any MCP client connects to /mcp instead of spawning a local process
 - **REST API** — search, store, and query the palace over HTTP (Android app, netdash, scripts)
@@ -91,7 +94,17 @@ Only runs while you're logged in. Use this if you don't have sudo or only need t
 
 Edit `palace-daemon.service` to set `PALACE_API_KEY` or a custom `--palace` path before installing.
 
+The service uses `Type=notify` and `WatchdogSec=120`: the daemon signals systemd when it is ready and sends a watchdog heartbeat every 60 s. If the watchdog goes silent (e.g. the palace collection breaks), systemd kills and restarts the daemon automatically.
+
 ## Troubleshooting
+
+### Palace reports `degraded` on `/health`
+The daemon is running but cannot open the ChromaDB collection. Since 1.5.1, `_get_collection` will attempt a self-heal automatically on the next tool call. If it persists:
+
+    curl -X POST http://localhost:8085/reload    # clear client cache
+    sudo systemctl restart palace-daemon         # full restart if reload fails
+
+Check `journalctl -u palace-daemon -n 50` for the logged exception — it will now show the exact error instead of a silent `None`.
 
 ### Port 8085 already in use
 If the daemon fails to start with `[Errno 98] address already in use`, it usually means a previous instance didn't shut down cleanly.
@@ -109,7 +122,7 @@ To manually clear the lock and port without starting:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | /health | Daemon + palace status (inc. version) |
+| GET | /health | Daemon + palace status; returns HTTP 503 `degraded` if collection is unavailable |
 | POST | /backup | Atomic verified SQLite backup |
 | POST | /reload | Clear client cache / refresh index |
 | POST | /repair | Coordinate repair with daemon traffic (`mode`: `light`/`scan`/`prune`/`rebuild`) |
