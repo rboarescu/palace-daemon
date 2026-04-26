@@ -1,0 +1,484 @@
+<!doctype html>
+<!--
+  /viz — palace-daemon status dashboard.
+
+  Single self-contained HTML page that fetches /graph, /repair/status, and
+  /health in parallel and renders five panels:
+
+    1. Status strip (header)        — version, drawers, repair state, pending
+    2. Knowledge graph (D3 force)   — kg_entities + kg_triples
+    3. Wing / room hierarchy        — Mermaid tree rendered from /graph.rooms
+    4. Tunnels                      — cross-wing rooms list
+    5. Wings bar chart (D3)         — drawer count per wing, sorted desc
+
+  Inspired by upstream MemPalace PRs:
+    #1022  sangeethkc        — interactive D3 KG visualization (KG-only scope)
+    #393   jravas            — Mermaid diagrams in docs (palace structure)
+    #431   MiloszPodsiadly   — `mempalace stats` CLI (count surface)
+    #256   rusel95           — `mempalace_sync_status` MCP tool (freshness)
+    #601   mvanhorn          — brief() retrieval mode (overview)
+
+  None of those PRs are cherry-picked. This page consumes the daemon's own
+  /graph endpoint, so it stays decoupled from upstream's evolution and
+  benefits from /graph's direct-sqlite optimization (sub-second on 151K
+  drawers vs. the 60-120s an MCP fan-out composition would cost).
+
+  Security: wing/room/entity names from /graph are user-controlled (the
+  user's own data, but a malicious wing name could carry HTML). All
+  user-derived strings are inserted via textContent / setAttribute, never
+  innerHTML. Mermaid IDs are derived from indices, not raw names; labels
+  pass through Mermaid's own escaping path.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>palace-daemon — viz</title>
+  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='28'>◈</text></svg>" />
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg:        #0a0e14;
+      --panel:    #11161e;
+      --border:   #1c232e;
+      --fg:       #e6edf3;
+      --muted:    #6e7e8e;
+      --accent:   #4dc9f6;
+      --accent-2: #7dd8f8;
+      --warn:     #f5a623;
+      --good:     #50c878;
+      --bad:      #d0021b;
+      --node-person:   #4A90D9;
+      --node-project:  #50C878;
+      --node-topic:    #F5A623;
+      --node-tool:     #D0021B;
+      --node-location: #9013FE;
+      --node-unknown:  #9B9B9B;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f7f9fc; --panel: #fff; --border: #e1e8f0; --fg: #1a1d23;
+        --muted: #6e7e8e; --accent: #2271b8; --accent-2: #1a5a92;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 1rem;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    h1 { font-size: 1.1rem; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+    h2 {
+      font-size: 0.78rem; margin: 0 0 0.6rem 0; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+    }
+    .h2-sub { text-transform: none; color: var(--muted); font-weight: 400; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-2); }
+    code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85em; color: var(--accent-2); }
+
+    .strip {
+      display: grid;
+      grid-template-columns: auto 1fr auto auto auto;
+      gap: 1.25rem;
+      align-items: center;
+      padding: 0.75rem 1rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 1rem;
+    }
+    .stat { display: flex; flex-direction: column; gap: 0.1rem; }
+    .stat .label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    .stat .value { font-size: 1.05rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .repair-pill {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.25rem 0.6rem; border-radius: 999px;
+      background: rgba(80,200,120,0.12); color: var(--good);
+      font-size: 0.78rem; font-weight: 500;
+    }
+    .repair-pill.busy { background: rgba(245,166,35,0.15); color: var(--warn); }
+    .repair-pill.error { background: rgba(208,2,27,0.12); color: var(--bad); }
+    .repair-pill .dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: currentColor; }
+    .repair-pill.busy .dot { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+    }
+    .panel.kg { min-height: 480px; display: flex; flex-direction: column; }
+    .panel.kg svg { flex: 1; min-height: 420px; cursor: grab; }
+    .panel.kg svg:active { cursor: grabbing; }
+
+    .node circle { stroke: var(--bg); stroke-width: 1.5px; }
+    .node text  { font-size: 0.72rem; fill: var(--fg); pointer-events: none; }
+    .link       { stroke: var(--muted); stroke-opacity: 0.5; }
+    .link-label { font-size: 0.62rem; fill: var(--muted); pointer-events: none; }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 0.6rem; font-size: 0.78rem; color: var(--muted); }
+    .legend .swatch { display: inline-flex; align-items: center; gap: 0.3rem; }
+    .legend .swatch i { display: inline-block; width: 0.65rem; height: 0.65rem; border-radius: 999px; }
+
+    .wing-row { display: grid; grid-template-columns: 9rem 1fr 4rem; gap: 0.5rem; align-items: center; padding: 0.18rem 0; }
+    .wing-row .name { font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wing-row .bar { height: 0.55rem; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; }
+    .wing-row .count { text-align: right; font-variant-numeric: tabular-nums; font-size: 0.82rem; color: var(--muted); }
+    .wing-row.dim { opacity: 0.35; }
+
+    .tunnel { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; }
+    .tunnel:hover { background: var(--bg); }
+    .tunnel .room { font-weight: 600; color: var(--accent); }
+    .tunnel .meta { font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; }
+    .tunnel.active { background: var(--bg); border-left: 3px solid var(--accent); padding-left: 0.4rem; }
+
+    .mermaid-wrap { background: var(--panel); border-radius: 4px; overflow: auto; max-height: 540px; }
+    .mermaid { font-size: 0.85rem; }
+
+    footer {
+      margin-top: 1rem; padding: 0.6rem 0.75rem; font-size: 0.72rem; color: var(--muted);
+      display: flex; justify-content: space-between; gap: 1rem;
+    }
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--fg); }
+
+    .err { color: var(--bad); font-size: 0.8rem; padding: 0.4rem 0; }
+  </style>
+</head>
+<body>
+
+<header class="strip">
+  <h1>◈ palace-daemon</h1>
+  <div></div>
+  <div class="stat">
+    <span class="label">version</span>
+    <span class="value" id="s-version">…</span>
+  </div>
+  <div class="stat">
+    <span class="label">drawers</span>
+    <span class="value" id="s-drawers">…</span>
+  </div>
+  <div id="s-repair" class="repair-pill"><span class="dot"></span><span id="s-repair-text">idle</span></div>
+</header>
+
+<section class="grid">
+  <div class="panel kg">
+    <h2>Knowledge graph</h2>
+    <svg id="kg" width="100%" height="100%"></svg>
+    <div id="kg-legend" class="legend"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Wings <span class="h2-sub">— click a tunnel below to highlight</span></h2>
+    <div id="wings"></div>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>Wing &nbsp;/&nbsp;&nbsp;Room hierarchy</h2>
+    <div class="mermaid-wrap"><pre id="hierarchy" class="mermaid">flowchart LR
+  loading["loading…"]</pre></div>
+  </div>
+
+  <div class="panel">
+    <h2>Tunnels <span class="h2-sub">— rooms that bridge wings</span></h2>
+    <div id="tunnels"></div>
+  </div>
+
+  <div class="panel">
+    <h2>KG stats</h2>
+    <div id="kg-stats"></div>
+  </div>
+</section>
+
+<footer>
+  <span>auto-refresh: <code id="refresh-state">manual</code> · <a href="#" id="refresh-now">refresh now</a></span>
+  <span><a href="https://github.com/jphein/palace-daemon">jphein/palace-daemon</a> · status @ <code id="ts">—</code></span>
+</footer>
+
+<script>
+//------------------------------------------------------------------ palette
+const PALETTE = {
+  person:   getComputedStyle(document.documentElement).getPropertyValue("--node-person").trim(),
+  project:  getComputedStyle(document.documentElement).getPropertyValue("--node-project").trim(),
+  topic:    getComputedStyle(document.documentElement).getPropertyValue("--node-topic").trim(),
+  tool:     getComputedStyle(document.documentElement).getPropertyValue("--node-tool").trim(),
+  location: getComputedStyle(document.documentElement).getPropertyValue("--node-location").trim(),
+  unknown:  getComputedStyle(document.documentElement).getPropertyValue("--node-unknown").trim(),
+};
+
+//------------------------------------------------------------------ params + auth
+const params = new URLSearchParams(location.search);
+const REFRESH_SECONDS = parseInt(params.get("refresh") || "0", 10);
+const KEY = params.get("key") || "";
+
+function withAuth(opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  if (KEY) headers["x-api-key"] = KEY;
+  return Object.assign({}, opts, { headers });
+}
+
+async function fetchJSON(path) {
+  const r = await fetch(path, withAuth());
+  if (!r.ok) throw new Error(path + " → HTTP " + r.status);
+  return r.json();
+}
+
+//------------------------------------------------------------------ DOM helpers (no innerHTML for user data)
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") node.className = v;
+      else if (k === "dataset") for (const [dk, dv] of Object.entries(v)) node.dataset[dk] = dv;
+      else if (k === "style") node.setAttribute("style", v);
+      else if (k === "title") node.title = v;        // safe: setter
+      else if (k === "href")  node.setAttribute("href", v);
+      else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+      else node.setAttribute(k, v);
+    }
+  }
+  for (const c of children) {
+    if (c == null) continue;
+    if (typeof c === "string" || typeof c === "number") node.appendChild(document.createTextNode(String(c)));
+    else node.appendChild(c);
+  }
+  return node;
+}
+
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+//------------------------------------------------------------------ renderers
+function renderHeader(health, repairStatus, graph) {
+  document.getElementById("s-version").textContent = "v" + (health && health.version ? health.version : "?");
+  const total = Object.values(graph && graph.wings || {}).reduce((a, b) => a + b, 0);
+  document.getElementById("s-drawers").textContent = total.toLocaleString();
+  const pill = document.getElementById("s-repair");
+  const text = document.getElementById("s-repair-text");
+  pill.classList.remove("busy", "error");
+  if (repairStatus && repairStatus.in_progress) {
+    pill.classList.add("busy");
+    text.textContent = "repair: " + (repairStatus.mode || "?") + " · " + (repairStatus.pending_writes || 0) + " pending";
+  } else {
+    text.textContent = "idle";
+  }
+  document.getElementById("ts").textContent = new Date().toLocaleTimeString();
+}
+
+function renderWings(graph) {
+  const wings = (graph && graph.wings) || {};
+  const sorted = Object.entries(wings).sort((a, b) => b[1] - a[1]);
+  const max = sorted[0] ? sorted[0][1] : 1;
+  const root = document.getElementById("wings");
+  clear(root);
+  sorted.forEach(([name, count]) => {
+    const row = el("div", { class: "wing-row", dataset: { wing: name }, title: name },
+      el("span", { class: "name" }, name),
+      el("span", { class: "bar", style: "width: " + (count / max * 100).toFixed(1) + "%;" }),
+      el("span", { class: "count" }, count.toLocaleString())
+    );
+    root.appendChild(row);
+  });
+}
+
+function renderTunnels(graph) {
+  const tunnels = (graph && graph.tunnels) || [];
+  const root = document.getElementById("tunnels");
+  clear(root);
+  if (tunnels.length === 0) {
+    root.appendChild(el("div", { style: "color:var(--muted); font-size:0.85rem;" }, "No tunnels in this palace."));
+    return;
+  }
+  tunnels.forEach(t => {
+    const wings = (t.wings || []).slice();
+    const summary = wings.length + " wings: " + wings.slice(0, 4).join(", ") + (wings.length > 4 ? ", +" + (wings.length - 4) : "");
+    const elNode = el("div", { class: "tunnel" },
+      el("div", { class: "room" }, t.room || "?"),
+      el("div", { class: "meta" }, summary)
+    );
+    elNode.addEventListener("click", () => highlightWings(wings, elNode));
+    root.appendChild(elNode);
+  });
+}
+
+function highlightWings(wings, clickedEl) {
+  document.querySelectorAll(".tunnel").forEach(t => t.classList.toggle("active", t === clickedEl));
+  const set = new Set(wings);
+  document.querySelectorAll(".wing-row").forEach(r => {
+    r.classList.toggle("dim", set.size > 0 && !set.has(r.dataset.wing));
+  });
+}
+
+function renderKGStats(graph) {
+  const s = (graph && graph.kg_stats) || {};
+  const ent = ((graph && graph.kg_entities) || []).length;
+  const tri = ((graph && graph.kg_triples) || []).length;
+  const root = document.getElementById("kg-stats");
+  clear(root);
+  const rows = [
+    ["entities", ent],
+    ["triples", tri],
+    ["current facts", s.current_facts || 0],
+    ["expired facts", s.expired_facts || 0],
+  ];
+  rows.forEach(([label, value]) => {
+    root.appendChild(el("div", { class: "wing-row" },
+      el("span", { class: "name" }, label),
+      el("span"),
+      el("span", { class: "count" }, value.toLocaleString())
+    ));
+  });
+}
+
+// Mermaid label sanitizer — allow only chars that don't blow up the parser.
+// (Mermaid escapes its own labels but a label containing `]` or `"` will
+// terminate the node definition early.)
+function mermaidSafe(s) {
+  return String(s == null ? "" : s).replace(/["\[\]<>|`]/g, "_").slice(0, 60);
+}
+
+function renderHierarchy(graph) {
+  const lines = ["flowchart LR"];
+  const rooms = (graph && graph.rooms) || [];
+  rooms.forEach((wingEntry, i) => {
+    const wingId = "w" + i;
+    const wingLabel = mermaidSafe(wingEntry.wing);
+    const total = Object.values(wingEntry.rooms || {}).reduce((a, b) => a + b, 0);
+    lines.push("  " + wingId + '["' + wingLabel + '<br/><small>' + total + " drawers</small>" + '"]');
+    Object.entries(wingEntry.rooms || {}).slice(0, 6).forEach(([room, n], j) => {
+      const roomId = wingId + "_r" + j;
+      const safe = mermaidSafe(room);
+      lines.push("  " + roomId + '["' + safe + "<br/>" + n + '"]');
+      lines.push("  " + wingId + " --> " + roomId);
+    });
+    const hidden = Math.max(0, Object.keys(wingEntry.rooms || {}).length - 6);
+    if (hidden > 0) {
+      lines.push("  " + wingId + '_more["+' + hidden + ' more rooms"]');
+      lines.push("  " + wingId + " --> " + wingId + "_more");
+    }
+  });
+  const target = document.getElementById("hierarchy");
+  target.removeAttribute("data-processed");
+  target.textContent = lines.join("\n");
+  if (window.mermaid && mermaid.run) {
+    mermaid.run({ querySelector: "#hierarchy" }).catch(e => {
+      clear(target);
+      target.appendChild(el("div", { class: "err" }, "mermaid render failed: " + e.message));
+    });
+  }
+}
+
+function renderKG(graph) {
+  const entities = (graph && graph.kg_entities) || [];
+  const triples = (graph && graph.kg_triples) || [];
+  const svg = d3.select("#kg");
+  svg.selectAll("*").remove();
+  const w = svg.node().clientWidth || 600;
+  const h = svg.node().clientHeight || 460;
+
+  const types = Array.from(new Set(entities.map(e => e.type || "unknown"))).sort();
+  const lg = document.getElementById("kg-legend");
+  clear(lg);
+  types.forEach(t => {
+    const colour = PALETTE[t] || PALETTE.unknown;
+    lg.appendChild(el("span", { class: "swatch" },
+      el("i", { style: "background:" + colour }),
+      t
+    ));
+  });
+
+  if (entities.length === 0) {
+    svg.append("text").attr("x", "50%").attr("y", "50%")
+      .attr("text-anchor", "middle").style("fill", "var(--muted)")
+      .style("font-size", "0.85rem")
+      .text("no entities in the knowledge graph yet");
+    return;
+  }
+
+  const nodes = entities.map(e => Object.assign({}, e, { id: e.id || e.name }));
+  const idIndex = new Map(nodes.map(n => [n.id, n]));
+  const links = [];
+  triples.forEach(t => {
+    if (idIndex.has(t.subject) && idIndex.has(t.object)) {
+      links.push({ source: t.subject, target: t.object, predicate: t.predicate });
+    }
+  });
+
+  const sim = d3.forceSimulation(nodes)
+    .force("link",   d3.forceLink(links).id(d => d.id).distance(80))
+    .force("charge", d3.forceManyBody().strength(-180))
+    .force("center", d3.forceCenter(w / 2, h / 2))
+    .force("collide", d3.forceCollide(28));
+
+  const root = svg.append("g");
+  svg.call(d3.zoom().scaleExtent([0.3, 4]).on("zoom", ev => root.attr("transform", ev.transform)));
+
+  const link = root.selectAll(".link").data(links).enter().append("line").attr("class", "link").attr("stroke-width", 1.2);
+  const linkLabel = root.selectAll(".link-label").data(links).enter().append("text").attr("class", "link-label").text(d => d.predicate);
+
+  const node = root.selectAll(".node").data(nodes).enter().append("g").attr("class", "node")
+    .call(d3.drag()
+      .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag",  (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end",   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  node.append("circle").attr("r", 10).attr("fill", d => PALETTE[d.type || "unknown"] || PALETTE.unknown);
+  node.append("text").attr("dx", 14).attr("dy", 4).text(d => d.name || d.id);
+
+  sim.on("tick", () => {
+    link.attr("x1", d => d.source.x).attr("y1", d => d.source.y).attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+    linkLabel.attr("x", d => (d.source.x + d.target.x)/2).attr("y", d => (d.source.y + d.target.y)/2);
+    node.attr("transform", d => "translate(" + d.x + "," + d.y + ")");
+  });
+}
+
+//------------------------------------------------------------------ load + refresh
+async function loadAll() {
+  try {
+    const [health, repairStatus, graph] = await Promise.all([
+      fetchJSON("/health"),
+      fetchJSON("/repair/status"),
+      fetchJSON("/graph"),
+    ]);
+    renderHeader(health, repairStatus, graph);
+    renderWings(graph);
+    renderTunnels(graph);
+    renderKGStats(graph);
+    renderHierarchy(graph);
+    renderKG(graph);
+  } catch (e) {
+    console.error(e);
+    const pill = document.getElementById("s-repair");
+    pill.classList.remove("busy");
+    pill.classList.add("error");
+    document.getElementById("s-repair-text").textContent = "error: " + e.message;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  if (window.mermaid) {
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: matchMedia("(prefers-color-scheme: light)").matches ? "default" : "dark",
+      securityLevel: "loose",
+    });
+  }
+  loadAll();
+  if (REFRESH_SECONDS >= 5) {
+    document.getElementById("refresh-state").textContent = REFRESH_SECONDS + "s";
+    setInterval(loadAll, REFRESH_SECONDS * 1000);
+  }
+  document.getElementById("refresh-now").addEventListener("click", e => { e.preventDefault(); loadAll(); });
+});
+</script>
+</body>
+</html>

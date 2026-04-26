@@ -29,7 +29,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 import mempalace.mcp_server as _mp
 from mempalace import repair as _mp_repair
@@ -685,6 +685,37 @@ async def graph(x_api_key: str | None = Header(default=None)):
         "kg_triples": kg_triples,
         "kg_stats": _unwrap(kg_stats_resp) or {},
     }
+
+
+# ── /viz status dashboard ───────────────────────────────────────────────────
+
+_VIZ_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "viz.html")
+_VIZ_HTML_CACHE: str | None = None
+
+
+@app.get("/viz", response_class=HTMLResponse)
+async def viz():
+    """Self-contained status dashboard at /viz.
+
+    Returns the HTML page from static/viz.html. The page client-side fetches
+    /graph, /repair/status, and /health in parallel and renders five panels:
+    KG force-graph (D3), wings bar chart, wing/room hierarchy (Mermaid),
+    tunnels list, KG stats. Auth happens on the data endpoints — the HTML
+    shell itself is public so /viz?key=... in the URL works for ergonomic
+    bookmarking. Cached at module load to avoid disk reads per request.
+
+    Inspired by upstream PRs #1022 (D3 KG viz), #393 (Mermaid diagrams),
+    #431 (CLI stats), #256 (sync_status MCP), #601 (brief overview) — none
+    cherry-picked, just patterns synthesized over the daemon's /graph.
+    """
+    global _VIZ_HTML_CACHE
+    if _VIZ_HTML_CACHE is None:
+        try:
+            with open(_VIZ_HTML_PATH, encoding="utf-8") as f:
+                _VIZ_HTML_CACHE = f.read()
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"viz template missing: {e}")
+    return HTMLResponse(content=_VIZ_HTML_CACHE)
 
 
 @app.post("/flush")
