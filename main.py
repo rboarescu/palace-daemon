@@ -48,6 +48,17 @@ PALACE_MAX_CONCURRENCY = int(os.getenv("PALACE_MAX_CONCURRENCY", "4"))
 PALACE_MAX_READ_CONCURRENCY = int(os.getenv("PALACE_MAX_READ_CONCURRENCY", str(PALACE_MAX_CONCURRENCY)))
 PALACE_MAX_WRITE_CONCURRENCY = int(os.getenv("PALACE_MAX_WRITE_CONCURRENCY", str(max(1, PALACE_MAX_CONCURRENCY // 2))))
 
+# Canonical topic for Stop-hook auto-save checkpoint diary entries. Matches
+# the value already used in clients/hook.py and clients/mempal-fast.py, plus
+# mempalace's `tool_diary_write` topic-routing for the
+# `mempalace_session_recovery` collection (the structural fix for #1161-era
+# checkpoint domination of search results).
+CHECKPOINT_TOPIC = "checkpoint"
+# Legacy synonyms older clients may have written. `_canonical_topic()`
+# rewrites these at the daemon boundary with a warning log line so drift
+# is visible and the palace stays clean.
+CHECKPOINT_TOPIC_SYNONYMS = ("auto-save",)
+
 # Read ops: up to PALACE_MAX_READ_CONCURRENCY concurrent.
 # Write ops: up to PALACE_MAX_WRITE_CONCURRENCY concurrent.
 # Set PALACE_MAX_WRITE_CONCURRENCY=1 to serialise writes (mitigates MemPalace
@@ -290,6 +301,38 @@ async def _drain_pending_writes() -> int:
     return count
 
 
+def _canonical_topic(topic) -> str:
+    """Canonicalize a Stop-hook checkpoint topic at the daemon boundary.
+
+    Synonyms become ``CHECKPOINT_TOPIC`` with a warning log so client-side
+    drift is visible. Any other string is left as-is — the caller may have
+    legitimately used a non-checkpoint topic name on this diary write
+    (e.g. ``"musings"``, ``"decisions"``) and we shouldn't clobber that.
+
+    Non-string inputs (``None``, numbers, lists from a malformed JSON
+    payload) collapse to ``CHECKPOINT_TOPIC`` with a warning, rather than
+    leaking through to ``tool_diary_write`` and turning a bad client
+    request into an internal type error.
+
+    Defense in depth: the bundled clients already write the canonical
+    value; this rewrite catches future drift, third-party callers, or
+    buggy clients without rejecting the save outright.
+    """
+    if not isinstance(topic, str):
+        _log.warning(
+            "silent-save: non-string topic %r (%s); coercing to %r",
+            topic, type(topic).__name__, CHECKPOINT_TOPIC,
+        )
+        return CHECKPOINT_TOPIC
+    if topic in CHECKPOINT_TOPIC_SYNONYMS:
+        _log.warning(
+            "silent-save: rewriting non-canonical checkpoint topic %r → %r",
+            topic, CHECKPOINT_TOPIC,
+        )
+        return CHECKPOINT_TOPIC
+    return topic
+
+
 async def _do_silent_save_write(payload: dict) -> dict:
     """Write a diary checkpoint via tool_diary_write in an executor.
 
@@ -298,7 +341,7 @@ async def _do_silent_save_write(payload: dict) -> dict:
     """
     wing = payload.get("wing", "") or ""
     entry = payload.get("entry", "")
-    topic = payload.get("topic", "checkpoint")
+    topic = _canonical_topic(payload.get("topic", CHECKPOINT_TOPIC))
     agent_name = payload.get("agent_name", "session-hook")
     loop = asyncio.get_running_loop()
 
