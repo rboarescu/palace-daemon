@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Maintenance
+- `mcp_server_get_collection.patch` — synced hunk offsets to mempalace 3.3.3; removed redundant `collection.modify()` re-application block since upstream now handles `hnsw:num_threads=1` enforcement via `_pin_hnsw_threads()`. Patch behaviour is unchanged.
+
 ## [1.5.1] - 2026-04-26
 
 ### Fixed
