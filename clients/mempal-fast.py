@@ -7,6 +7,13 @@ from pathlib import Path
 SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
+# Canonical topic for Stop-hook auto-save checkpoint diary entries.
+# Matches the constant in clients/hook.py — both client paths must
+# write the same topic value so downstream readers (mempalace's
+# tool_diary_write topic-routing, any read-side filters) see a single
+# canonical name regardless of which client posted the save.
+CHECKPOINT_TOPIC = "checkpoint"
+
 
 def log(msg):
     try:
@@ -91,7 +98,7 @@ def main():
         "session_id": session_id,
         "wing": wing_from_path(transcript_path),
         "entry": f"Stop checkpoint at {count} exchanges",
-        "topic": "checkpoint",
+        "topic": CHECKPOINT_TOPIC,
         "agent_name": "session-hook",
         "themes": [],
         "message_count": since_last,
