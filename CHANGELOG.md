@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+- **`GET /graph`** — single-shot structural snapshot for SME-style consumers. Mirrors `/stats`'s `asyncio.gather` shape but adds rooms-per-wing fan-out + a direct read-only sqlite read of `knowledge_graph.sqlite3`. Replaces what an adapter would otherwise compose serially over HTTP — on a 151K-drawer palace, `list_wings` alone takes ~30s, so a serial composition costs minutes.
+- Response shape: `{ "wings": {<name>: <count>, ...}, "rooms": [{"wing": "<name>", "rooms": {<room>: <count>, ...}}, ...], "tunnels": [...], "kg_entities": [...], "kg_triples": [...], "kg_stats": {...} }`.
+- KG read uses URI-mode `?mode=ro` so the daemon can never accidentally write that file. Schema differences across mempalace versions tolerated via per-query `OperationalError` catch.
+- Wings + rooms read directly from `chroma.sqlite3.embedding_metadata` (read-only, off the asyncio loop), bypassing the `list_wings` + `list_rooms × N` MCP fan-out which serializes through the read semaphore. Schema is ChromaDB's internal layout; if it ever drifts, /graph degrades gracefully to empty wings/rooms.
+- Tunnels derived from `mempalace_graph_stats.top_tunnels` rather than `mempalace_list_tunnels` — the two disagree on what counts as a tunnel on mempalace 3.3.4 (`list_tunnels` returns `[]`, `graph_stats.tunnel_rooms` reports the real count). Spec at `docs/graph-endpoint.md` Part 2 for the upstream-mempalace fix.
+- Spec / design notes: `docs/graph-endpoint.md`. Coordinates with `multipass-structural-memory-eval` (SME) — adapter prefers `/graph` once daemon ≥ this release and falls back to MCP composition otherwise.
+
 ### Maintenance
 - `mcp_server_get_collection.patch` — synced hunk offsets to mempalace 3.3.3; removed redundant `collection.modify()` re-application block since upstream now handles `hnsw:num_threads=1` enforcement via `_pin_hnsw_threads()`. Patch behaviour is unchanged.
 
