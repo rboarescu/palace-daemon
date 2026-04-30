@@ -457,6 +457,40 @@ async def context(topic: str, limit: int = 5, x_api_key: str | None = Header(def
     return _unwrap(result)
 
 
+@app.get("/list")
+async def list_drawers(
+    wing: str | None = None,
+    room: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    x_api_key: str | None = Header(default=None),
+):
+    """List drawers by metadata (wing/room) — no search query required.
+
+    Wraps mempalace's ``mempalace_list_drawers`` MCP tool. Unlike /search,
+    this is an unranked listing pulled directly from sqlite metadata, so
+    it's the right path for browsing a wing without an embeddable query
+    (e.g. familiar's reflect-memories panel which wants "all drawers in
+    wing=reflect" sorted by recency).
+
+    Either ``wing`` or ``room`` (or both) should be supplied; with neither,
+    returns the first ``limit`` drawers across the whole palace, ordered
+    by mempalace's natural metadata-table order.
+    """
+    _check_auth(x_api_key)
+    args: dict = {"limit": int(limit), "offset": int(offset)}
+    if wing is not None:
+        args["wing"] = wing
+    if room is not None:
+        args["room"] = room
+    result = await _call({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": "mempalace_list_drawers", "arguments": args},
+    })
+    return _unwrap(result)
+
+
 @app.post("/memory")
 async def store_memory(request: Request, x_api_key: str | None = Header(default=None)):
     _check_auth(x_api_key)
