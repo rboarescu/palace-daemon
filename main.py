@@ -440,7 +440,7 @@ async def search(q: str, limit: int = 5, x_api_key: str | None = Header(default=
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": q, "max_results": limit}},
+        "params": {"name": "mempalace_search", "arguments": {"query": q, "limit": limit}},
     })
     return _unwrap(result)
 
@@ -452,7 +452,7 @@ async def context(topic: str, limit: int = 5, x_api_key: str | None = Header(def
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": topic, "max_results": limit}},
+        "params": {"name": "mempalace_search", "arguments": {"query": topic, "limit": limit}},
     })
     return _unwrap(result)
 
