@@ -457,6 +457,35 @@ async def context(topic: str, limit: int = 5, x_api_key: str | None = Header(def
     return _unwrap(result)
 
 
+@app.delete("/memory/{drawer_id}")
+async def delete_memory(drawer_id: str, x_api_key: str | None = Header(default=None)):
+    """Delete a drawer by id. Wraps mempalace_delete_drawer."""
+    _check_auth(x_api_key)
+    result = await _call({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": "mempalace_delete_drawer", "arguments": {"drawer_id": drawer_id}},
+    })
+    return _unwrap(result)
+
+
+@app.patch("/memory/{drawer_id}")
+async def update_memory(drawer_id: str, request: Request, x_api_key: str | None = Header(default=None)):
+    """Update a drawer's content/wing/room. Wraps mempalace_update_drawer."""
+    _check_auth(x_api_key)
+    body = await request.json()
+    args: dict = {"drawer_id": drawer_id}
+    if "content" in body: args["content"] = body["content"]
+    if "wing" in body: args["wing"] = body["wing"]
+    if "room" in body: args["room"] = body["room"]
+    result = await _call({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": "mempalace_update_drawer", "arguments": args},
+    })
+    return _unwrap(result)
+
+
 @app.post("/memory")
 async def store_memory(request: Request, x_api_key: str | None = Header(default=None)):
     _check_auth(x_api_key)
