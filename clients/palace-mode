@@ -16,8 +16,15 @@
 set -euo pipefail
 
 SETTINGS="$HOME/.claude/settings.local.json"
-DEFAULT_URL="http://disks.jphe.in:8085"
-DEFAULT_KEY="adb43b99effac3aced2c82de54827850c6da1fbf4a5e473e1938529b27c08ab3"
+
+# Defaults are read from the environment so this script ships without any
+# user-specific values. Override via the env vars below or pass an explicit
+# URL on the `remote` subcommand. PALACE_API_KEY is *only* required when
+# the target daemon enforces auth (i.e. its own server-side PALACE_API_KEY
+# is set); a daemon running without auth accepts unauthenticated clients.
+# Export the env vars in your shell environment.
+DEFAULT_URL="${PALACE_DAEMON_URL_DEFAULT:-${PALACE_DAEMON_URL:-}}"
+DEFAULT_KEY="${PALACE_API_KEY:-}"
 
 # Resolve clients dir relative to this script (works as symlink too).
 CLIENTS_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" &> /dev/null && pwd)"
@@ -40,6 +47,17 @@ PY
 
 set_mode_remote() {
     url="${1:-$DEFAULT_URL}"
+    if [ -z "$url" ]; then
+        echo "error: no daemon URL — pass one as the first arg or set PALACE_DAEMON_URL_DEFAULT or PALACE_DAEMON_URL in env" >&2
+        echo "  example: palace-mode remote http://your-host:8085" >&2
+        exit 2
+    fi
+    if [ -z "$DEFAULT_KEY" ]; then
+        # Auth-less daemon is a valid setup — server-side _check_auth only
+        # enforces when PALACE_API_KEY is set there. Warn but proceed.
+        echo "warning: PALACE_API_KEY not set — proceeding without auth header" >&2
+        echo "  if the daemon at $url enforces auth, the client will get 401s." >&2
+    fi
     python3 - <<PY
 import json
 p = "$SETTINGS"
