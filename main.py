@@ -301,7 +301,7 @@ async def _drain_pending_writes() -> int:
     return count
 
 
-def _canonical_topic(topic) -> str:
+def _canonical_topic(topic, *, caller: dict | None = None) -> str:
     """Canonicalize a Stop-hook checkpoint topic at the daemon boundary.
 
     Synonyms become ``CHECKPOINT_TOPIC`` with a warning log so client-side
@@ -317,17 +317,29 @@ def _canonical_topic(topic) -> str:
     Defense in depth: the bundled clients already write the canonical
     value; this rewrite catches future drift, third-party callers, or
     buggy clients without rejecting the save outright.
+
+    ``caller`` is an optional dict of identifying fields (``agent_name``,
+    ``wing``, ``session_id``) included verbatim in any warning log. Lets
+    operators trace a misbehaving client across many concurrent saves.
     """
+    ctx = ""
+    if caller:
+        # Compact, structured tail — only fields that actually have a
+        # value get included so an empty payload doesn't produce a
+        # verbose log.
+        bits = [f"{k}={v!r}" for k, v in caller.items() if v not in (None, "")]
+        if bits:
+            ctx = " (caller: " + ", ".join(bits) + ")"
     if not isinstance(topic, str):
         _log.warning(
-            "silent-save: non-string topic %r (%s); coercing to %r",
-            topic, type(topic).__name__, CHECKPOINT_TOPIC,
+            "silent-save: non-string topic %r (%s); coercing to %r%s",
+            topic, type(topic).__name__, CHECKPOINT_TOPIC, ctx,
         )
         return CHECKPOINT_TOPIC
     if topic in CHECKPOINT_TOPIC_SYNONYMS:
         _log.warning(
-            "silent-save: rewriting non-canonical checkpoint topic %r → %r",
-            topic, CHECKPOINT_TOPIC,
+            "silent-save: rewriting non-canonical checkpoint topic %r -> %r%s",
+            topic, CHECKPOINT_TOPIC, ctx,
         )
         return CHECKPOINT_TOPIC
     return topic
@@ -341,8 +353,15 @@ async def _do_silent_save_write(payload: dict) -> dict:
     """
     wing = payload.get("wing", "") or ""
     entry = payload.get("entry", "")
-    topic = _canonical_topic(payload.get("topic", CHECKPOINT_TOPIC))
     agent_name = payload.get("agent_name", "session-hook")
+    topic = _canonical_topic(
+        payload.get("topic", CHECKPOINT_TOPIC),
+        caller={
+            "agent_name": agent_name,
+            "wing": wing,
+            "session_id": payload.get("session_id"),
+        },
+    )
     loop = asyncio.get_running_loop()
 
     def _work():
