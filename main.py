@@ -505,7 +505,14 @@ async def update_memory(drawer_id: str, request: Request, x_api_key: str | None 
 @app.post("/memory")
 async def store_memory(request: Request, x_api_key: str | None = Header(default=None)):
     _check_auth(x_api_key)
-    body = await request.json()
+    # Same guards as PATCH /memory/{id} — malformed/empty JSON or
+    # non-object payloads should fail with 400, not propagate as 500.
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
     content = body.get("content", "")
     wing = body.get("wing", "general")
     room = body.get("room", "notes")
