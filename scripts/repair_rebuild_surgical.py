@@ -74,7 +74,9 @@ def rebuild():
         try:
             col.upsert(ids=ids, documents=docs, metadatas=metas)
             print(f"  Processed {i + len(batch)}/{len(all_drawers)}")
-            time.sleep(0.5) # Slight delay to let disk/compactor breathe
+            delay = float(os.environ.get("REBUILD_BATCH_DELAY", "0.0"))
+            if delay > 0:
+                time.sleep(delay) # Optional delay to let disk/compactor breathe
         except Exception as e:
             print(f"  Batch failed at {i}: {e}. Retrying once...")
             time.sleep(2)
