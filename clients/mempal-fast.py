@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Stdlib-only stop hook — bypasses mempalace import to avoid chromadb HNSW
 # cold-start segfaults. Requires PALACE_DAEMON_URL set.
-import json, os, re, sys, urllib.request
+import hashlib, json, os, re, sys, urllib.request
 from pathlib import Path
 
 SAVE_INTERVAL = 15
@@ -31,9 +31,28 @@ def count_human_messages(transcript_path):
     p = Path(transcript_path).expanduser()
     if not p.is_file() or p.suffix not in (".jsonl", ".json"):
         return 0
+
+    path_hash = hashlib.md5(str(p.resolve()).encode("utf-8")).hexdigest()
+    cache_file = STATE_DIR / f"msg_cache_{path_hash}.json"
+
     n = 0
+    offset = 0
+
+    if cache_file.is_file():
+        try:
+            with cache_file.open() as f:
+                cache = json.load(f)
+                if cache.get("path") == str(p.resolve()):
+                    if p.stat().st_size >= cache.get("offset", 0):
+                        n = cache.get("count", 0)
+                        offset = cache.get("offset", 0)
+        except Exception:
+            pass
+
     try:
         with p.open(encoding="utf-8", errors="replace") as f:
+            if offset > 0:
+                f.seek(offset)
             for line in f:
                 try:
                     e = json.loads(line)
@@ -45,6 +64,14 @@ def count_human_messages(transcript_path):
                             n += 1
                 except (json.JSONDecodeError, AttributeError):
                     pass
+            new_offset = f.tell()
+
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with cache_file.open("w") as f:
+                json.dump({"path": str(p.resolve()), "offset": new_offset, "count": n}, f)
+        except Exception:
+            pass
     except OSError:
         pass
     return n
