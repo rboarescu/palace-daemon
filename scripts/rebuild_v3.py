@@ -69,6 +69,7 @@ def rebuild():
 
     print("Upserting drawers in small batches (100) with delays...")
     batch_size = 100
+    delay = float(os.getenv("REBUILD_DELAY", "0.0"))
     for i in range(0, len(all_drawers), batch_size):
         batch = all_drawers[i : i + batch_size]
         ids = [d["id"] for d in batch]
@@ -78,7 +79,8 @@ def rebuild():
         try:
             col.upsert(ids=ids, documents=docs, metadatas=metas)
             print(f"  Processed {i + len(batch)}/{len(all_drawers)}")
-            time.sleep(0.3)
+            if delay > 0:
+                time.sleep(delay)
         except Exception as e:
             print(f"  Batch failed at {i}: {e}. Retrying once...")
             time.sleep(2)
