@@ -26,7 +26,27 @@ from pathlib import Path
 HOOK_SETTINGS = Path.home() / ".mempalace" / "hook_settings.json"
 CHECKPOINT_TOPIC = "checkpoint"
 
+class TokenBucket:
+    def __init__(self, rate: float, capacity: float):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_refill = time.monotonic()
 
+    def consume(self, tokens: float = 1.0):
+        while True:
+            now = time.monotonic()
+            elapsed = now - self.last_refill
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            self.last_refill = now
+
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return
+
+            # Not enough tokens, wait until enough accumulate
+            wait_time = (tokens - self.tokens) / self.rate
+            time.sleep(wait_time)
 def load_daemon_url() -> str:
     try:
         s = json.loads(HOOK_SETTINGS.read_text())
@@ -137,6 +157,8 @@ def main():
     print(f"Found {len(jsonl_files)} session files\n")
 
     written = skipped_short = skipped_empty = 0
+    # Rate limit to 10 requests per second with a burst capacity of 10
+    rate_limiter = TokenBucket(rate=10.0, capacity=10.0)
 
     for i, path in enumerate(jsonl_files, 1):
         turns, date_str = extract_messages(path)
@@ -191,7 +213,7 @@ def main():
             status = "OK" if ok else "FAIL"
             print(f"{prefix} {status} ({n_user} turns)")
             written += 1
-            time.sleep(0.1)  # avoid hammering daemon
+            rate_limiter.consume()
 
     print(f"\nDone. written={written} skipped_short={skipped_short} skipped_empty={skipped_empty}")
 
