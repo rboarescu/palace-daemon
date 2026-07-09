@@ -1545,10 +1545,14 @@ async def repair(request: Request, x_api_key: str | None = Header(default=None))
                 palace_path = _mp._config.palace_path
                 await loop.run_in_executor(None, _mp_repair.scan_palace, palace_path)
                 corrupt_file = os.path.join(palace_path, "corrupt_ids.txt")
-                count = 0
-                if os.path.isfile(corrupt_file):
-                    with open(corrupt_file, encoding="utf-8") as f:
-                        count = sum(1 for ln in f if ln.strip())
+
+                def count_corrupt_ids():
+                    if os.path.isfile(corrupt_file):
+                        with open(corrupt_file, encoding="utf-8") as f:
+                            return sum(1 for ln in f if ln.strip())
+                    return 0
+
+                count = await asyncio.to_thread(count_corrupt_ids)
                 result = {"corrupt_ids_found": count, "corrupt_file": corrupt_file}
 
         elif mode == "prune":
