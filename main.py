@@ -208,7 +208,7 @@ async def _hnsw_mtime_refresh_loop(interval_secs: int = 60) -> None:
         if _repair_state.get("in_progress"):
             continue
         try:
-            for name in os.listdir(palace_path):
+            for name in await asyncio.to_thread(os.listdir, palace_path):
                 if "-" not in name or name.startswith(".") or ".drift-" in name:
                     continue
                 seg_dir = os.path.join(palace_path, name)
