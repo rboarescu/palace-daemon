@@ -1064,10 +1064,7 @@ _VIZ_HTML_CACHE: str | None = None
 
 
 @app.get("/viz", response_class=HTMLResponse)
-async def viz(
-    key: str | None = None,
-    x_api_key: str | None = Header(default=None),
-):
+async def viz():
     """Self-contained status dashboard at /viz.
 
     Returns the HTML page from static/viz.html. The page then fetches
@@ -1075,12 +1072,10 @@ async def viz(
     KG force-graph (D3), wings bar chart, wing/room hierarchy (Mermaid),
     tunnels list, KG stats.
 
-    Auth: same as every other endpoint — ``X-Api-Key`` header. As an
-    ergonomic shortcut for browser bookmarking, ``?key=...`` is also
-    accepted; the page reads it from the URL and re-supplies it to the
-    data endpoints. The ``?key=...`` shape leaks the key into browser
-    history, proxy logs, and referer headers — prefer the header for
-    anything beyond a personal bookmark.
+    Auth: The HTML page itself is served unauthenticated. The client-side
+    JavaScript handles authentication for the data endpoints by prompting
+    the user for the API key (if required) and storing it in localStorage.
+    This avoids leaking the key in URLs, referer headers, or proxy logs.
 
     The HTML template is read from disk lazily on the first request and
     cached in-process thereafter (one disk read per daemon process).
@@ -1089,11 +1084,6 @@ async def viz(
     #431 (CLI stats), #256 (sync_status MCP), #601 (brief overview) — none
     cherry-picked, just patterns synthesized over the daemon's /graph.
     """
-    # Accept the API key from either the X-Api-Key header (preferred) or
-    # the ?key= query parameter (bookmarkable). _check_auth is a no-op
-    # when PALACE_API_KEY is unset, so this preserves the
-    # zero-config-local-dev experience.
-    _check_auth(x_api_key or key)
     global _VIZ_HTML_CACHE
     if _VIZ_HTML_CACHE is None:
         try:

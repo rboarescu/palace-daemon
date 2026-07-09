@@ -232,13 +232,9 @@ const PALETTE = {
 //------------------------------------------------------------------ params + auth
 const params = new URLSearchParams(location.search);
 const REFRESH_SECONDS = parseInt(params.get("refresh") || "0", 10);
-// `?key=...` is supported as a bookmarkable shortcut for the API key. This
-// is convenient but the key will appear in the browser's history, in any
-// referer header sent to a third-party origin, and in the access logs of
-// any forward proxy or reverse proxy on the path. **Do not use ?key= when
-// the dashboard might be screen-shared, screencast, or proxied through a
-// shared intermediary.** Prefer the `X-Api-Key` header for those cases.
-const KEY = params.get("key") || "";
+// Read the API key from localStorage. This avoids leaking the key via URLs,
+// browser history, or proxy logs.
+let KEY = localStorage.getItem("palace_api_key") || "";
 
 function withAuth(opts) {
   opts = opts || {};
@@ -248,7 +244,17 @@ function withAuth(opts) {
 }
 
 async function fetchJSON(path) {
-  const r = await fetch(path, withAuth());
+  let r = await fetch(path, withAuth());
+  if (r.status === 401) {
+    const inputKey = prompt("API Key required for " + path + ":");
+    if (inputKey !== null) {
+      KEY = inputKey.trim();
+      localStorage.setItem("palace_api_key", KEY);
+      r = await fetch(path, withAuth());
+    } else {
+      throw new Error("Authentication required for " + path);
+    }
+  }
   if (!r.ok) throw new Error(path + " → HTTP " + r.status);
   return r.json();
 }
