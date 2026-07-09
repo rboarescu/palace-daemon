@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- **`/search` and `/context` accept optional `wing` and `room` filters** — both endpoints now forward `wing=` and `room=` query params into `mempalace_search` when supplied, mirroring the existing pass-through pattern on `/list`. When omitted the endpoints behave exactly as before, so existing clients are unaffected. Covers the common multi-tenant case where a caller wants to scope a semantic search to a single wing without filtering the result set client-side. Includes 7 unit tests (`tests/test_search_wing_filter.py`) covering back-compat + each filter combination.
+
 # Changelog — continued
 
 ## [1.8.2] - 2026-07-06

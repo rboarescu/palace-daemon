@@ -715,24 +715,46 @@ async def health():
 
 
 @app.get("/search")
-async def search(q: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
+async def search(
+    q: str,
+    limit: int = 5,
+    wing: str | None = None,
+    room: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
     _check_auth(x_api_key)
+    args: dict = {"query": q, "limit": limit}
+    if wing is not None:
+        args["wing"] = wing
+    if room is not None:
+        args["room"] = room
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": q, "limit": limit}},
+        "params": {"name": "mempalace_search", "arguments": args},
     })
     return _unwrap(result)
 
 
 @app.get("/context")
-async def context(topic: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
+async def context(
+    topic: str,
+    limit: int = 5,
+    wing: str | None = None,
+    room: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
     # Alias for /search with a semantically friendlier name for LLM tool prompts
     _check_auth(x_api_key)
+    args: dict = {"query": topic, "limit": limit}
+    if wing is not None:
+        args["wing"] = wing
+    if room is not None:
+        args["room"] = room
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": topic, "limit": limit}},
+        "params": {"name": "mempalace_search", "arguments": args},
     })
     return _unwrap(result)
 
