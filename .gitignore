@@ -11,3 +11,4 @@ entities.json
 *.log
 .env
 venv/
+dummy_queue.jsonl

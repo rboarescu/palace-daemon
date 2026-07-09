@@ -1620,13 +1620,17 @@ async def repair(request: Request, x_api_key: str | None = Header(default=None))
 async def repair_status():
     """Current repair state + pending-writes queue depth."""
     queue_path = _pending_writes_path()
-    pending = 0
-    if os.path.isfile(queue_path):
-        try:
-            with open(queue_path, encoding="utf-8") as f:
-                pending = sum(1 for ln in f if ln.strip())
-        except OSError:
-            pending = -1
+
+    def _count_pending():
+        if os.path.isfile(queue_path):
+            try:
+                with open(queue_path, encoding="utf-8") as f:
+                    return sum(1 for ln in f if ln.strip())
+            except OSError:
+                return -1
+        return 0
+
+    pending = await asyncio.to_thread(_count_pending)
     resp = {
         "in_progress": _repair_state["in_progress"],
         "mode": _repair_state["mode"],
