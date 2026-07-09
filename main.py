@@ -1662,8 +1662,13 @@ def _clear_port(port: int):
     """Attempt to kill any process currently holding the target port."""
     import subprocess
     try:
+        port = int(port)
+        if not (0 < port < 65536):
+            return
         # Use fuser to kill the process on the port.
         subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
+    except (ValueError, TypeError):
+        pass
     except Exception:
         pass
 
