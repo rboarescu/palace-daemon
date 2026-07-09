@@ -412,9 +412,13 @@ async def _drain_pending_writes() -> int:
         return 0
     count = 0
     failed_lines: list[str] = []
-    try:
+
+    def _read_lines():
         with open(proc_path, encoding="utf-8") as f:
-            lines = [ln for ln in f.readlines() if ln.strip()]
+            return [ln for ln in f if ln.strip()]
+
+    try:
+        lines = await asyncio.to_thread(_read_lines)
         for line in lines:
             try:
                 entry = json.loads(line)
