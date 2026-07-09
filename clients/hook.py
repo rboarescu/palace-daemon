@@ -142,88 +142,147 @@ def _load_hook_settings() -> dict:
         return {}
 
 
-def _count_human_messages(transcript_path: str) -> int:
+def _get_transcript_state(transcript_path: str) -> dict:
+    import hashlib
     path = _validate_transcript_path(transcript_path)
-    if path is None:
-        return 0
-    if not path.is_file():
-        return 0
-    count = 0
+    if path is None or not path.is_file():
+        return {"count": 0, "turns": []}
+
+    path_hash = hashlib.md5(str(path).encode('utf-8')).hexdigest()
+
+    global _state_dir_initialized
+    if not _state_dir_initialized:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            STATE_DIR.chmod(0o700)
+        except (OSError, NotImplementedError):
+            pass
+        _state_dir_initialized = True
+
+    cache_path = STATE_DIR / f"{path_hash}_parse_cache.json"
+
+    state = {"size": 0, "count": 0, "turns": []}
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
+        if cache_path.is_file():
+            with open(cache_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+    except Exception:
+        pass
+
+    try:
+        stat = path.stat()
+        current_size = stat.st_size
+    except OSError:
+        return {"count": 0, "turns": []}
+
+    if current_size < state.get("size", 0):
+        # file truncated or rotated
+        state = {"size": 0, "count": 0, "turns": []}
+    elif current_size == state.get("size", 0):
+        return state
+
+    new_count = state.get("count", 0)
+    new_turns = state.get("turns", [])
+
+    try:
+        with open(path, "rb") as f:
+            if state.get("size", 0) > 0:
+                f.seek(state.get("size", 0))
+
+            while True:
+                line_bytes = f.readline()
+                if not line_bytes:
+                    break
+                if not line_bytes.endswith(b'\n'):
+                    # incomplete line, skip parsing and stop here
+                    break
+
+                state["size"] = f.tell()
+
+                line = line_bytes.decode('utf-8', errors='replace')
                 try:
                     entry = json.loads(line)
                     msg = entry.get("message", {})
-                    if isinstance(msg, dict) and msg.get("role") == "user":
-                        content = msg.get("content", "")
-                        if isinstance(content, str):
-                            if "<command-message>" in content:
-                                continue
-                        elif isinstance(content, list):
-                            text = " ".join(
-                                b.get("text", "") for b in content if isinstance(b, dict)
-                            )
-                            if "<command-message>" in text:
-                                continue
-                            # All-tool_result content is a tool roundtrip,
-                            # not a human exchange — skip.
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+
+                # --- Count logic ---
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    is_counted = True
+                    if isinstance(content, str):
+                        if "<command-message>" in content:
+                            is_counted = False
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            b.get("text", "") for b in content if isinstance(b, dict)
+                        )
+                        if "<command-message>" in text:
+                            is_counted = False
+                        else:
                             text_blocks = [
                                 b for b in content
                                 if isinstance(b, dict) and b.get("type") == "text"
                             ]
                             if not text_blocks:
-                                continue
-                        count += 1
-                    elif entry.get("type") == "event_msg":
-                        payload = entry.get("payload", {})
-                        if isinstance(payload, dict) and payload.get("type") == "user_message":
-                            msg_text = payload.get("message", "")
-                            if isinstance(msg_text, str) and "<command-message>" not in msg_text:
-                                count += 1
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+                                is_counted = False
+                    if is_counted:
+                        new_count += 1
+                elif entry.get("type") == "event_msg":
+                    payload = entry.get("payload", {})
+                    if isinstance(payload, dict) and payload.get("type") == "user_message":
+                        msg_text = payload.get("message", "")
+                        if isinstance(msg_text, str) and "<command-message>" not in msg_text:
+                            new_count += 1
+
+                # --- Extract logic ---
+                if isinstance(msg, dict):
+                    role = msg.get("role")
+                    if role in ("user", "assistant"):
+                        content = msg.get("content", "")
+                        text = ""
+                        if isinstance(content, str):
+                            text = content.strip()
+                        elif isinstance(content, list):
+                            text = " ".join(
+                                b.get("text", "").strip()
+                                for b in content
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            ).strip()
+                        if text and "<command-message>" not in text:
+                            new_turns.append({"role": role, "text": text[:600]})
+                            if len(new_turns) > 200:
+                                new_turns = new_turns[-200:]
+
     except OSError:
-        return 0
-    return count
+        pass
+
+    state["count"] = new_count
+    state["turns"] = new_turns
+
+    try:
+        tmp_cache_path = cache_path.with_suffix(".tmp")
+        with open(tmp_cache_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        tmp_cache_path.replace(cache_path)
+    except OSError:
+        pass
+
+    return state
+
+
+def _count_human_messages(transcript_path: str) -> int:
+    state = _get_transcript_state(transcript_path)
+    return state.get("count", 0)
 
 
 def _extract_messages(transcript_path: str, max_turns: int = 30) -> list:
     """Extract last N user+assistant text turns from the session JSONL."""
-    path = _validate_transcript_path(transcript_path)
-    if path is None or not path.is_file():
-        return []
-    turns = []
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                    msg = entry.get("message", {})
-                    if not isinstance(msg, dict):
-                        continue
-                    role = msg.get("role")
-                    if role not in ("user", "assistant"):
-                        continue
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "").strip()
-                            for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ).strip()
-                    else:
-                        continue
-                    if not text or "<command-message>" in text:
-                        continue
-                    turns.append({"role": role, "text": text[:600]})
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-    except OSError:
-        return []
-    return turns[-max_turns:]
+    state = _get_transcript_state(transcript_path)
+    turns = state.get("turns", [])
+    if max_turns and len(turns) > max_turns:
+        return turns[-max_turns:]
+    return turns
 
 
 def _auth_headers() -> dict:
