@@ -1,5 +1,15 @@
 # palace-daemon
 
+> [!IMPORTANT]
+> **ARCHIVED 2026-09-05 — superseded by upstream MemPalace.** Since MemPalace 3.5.0/3.6.0 the
+> upstream package ships everything this daemon was built for: `mempalace serve` (HTTP MCP hub
+> with bearer auth, TLS, read-only mode), process-lifetime writer leases, concurrent reads (3.9.0),
+> a thin stdio proxy that auto-discovers the hub, and hooks that forward mines to it. The HNSW
+> quarantine and memory-growth workarounds carried here were fixed upstream in 3.6.0 and 3.8.0.
+> This repo is kept for reference only; final tag `v1.8.2-final`. Forks: jphein, techempower-org.
+> Migration: `pipx install mempalace` → `mempalace serve --host 0.0.0.0 --port 8765` under systemd
+> → `claude mcp add --transport http mempalace http://HOST:8765/mcp --header "Authorization: Bearer <token>"`.
+
 An HTTP/MCP gateway for [MemPalace](https://github.com/MemPalace/mempalace) that coordinates concurrent access to the palace through a single process.
 
 ## Why

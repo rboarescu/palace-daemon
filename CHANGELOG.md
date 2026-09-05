@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [Archived] - 2026-09-05
+
+- **Project retired.** mempalace upgraded 3.3.6 → 3.9.0 on 0lympus; the daemon is replaced by upstream
+  `mempalace serve` (systemd unit `mempalace-hub.service`, port 8765). `scripts/apply_patches.sh` removed
+  (no patches have existed since 3e84ff5). See the README banner for the migration recipe.
+
 # Changelog — continued
 
 ## [1.8.2] - 2026-07-06
